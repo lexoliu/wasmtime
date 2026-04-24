@@ -10,6 +10,10 @@
     clippy::cast_sign_loss,
     reason = "platforms too fiddly to worry about this"
 )]
+#![cfg_attr(
+    not(has_virtual_memory),
+    expect(dead_code, reason = "mmap helpers are only used with virtual memory")
+)]
 
 use crate::runtime::vm::SendSyncPtr;
 use core::ptr::{self, NonNull};

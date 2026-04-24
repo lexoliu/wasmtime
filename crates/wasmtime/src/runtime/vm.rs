@@ -42,6 +42,7 @@ use core::fmt;
 use core::ops::{Deref, DerefMut};
 use core::pin::pin;
 use core::ptr::NonNull;
+#[cfg(has_virtual_memory)]
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 use wasmtime_environ::error::OutOfMemory;
@@ -115,8 +116,12 @@ pub use crate::runtime::vm::mmap_vec::MmapVec;
 pub use crate::runtime::vm::provenance::*;
 pub use crate::runtime::vm::stack_switching::*;
 pub use crate::runtime::vm::store_box::*;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", has_virtual_memory))]
 pub use crate::runtime::vm::sys::mmap::open_file_for_mmap;
+#[cfg(all(feature = "std", not(has_virtual_memory)))]
+pub(crate) fn open_file_for_mmap(path: &std::path::Path) -> crate::Result<std::fs::File> {
+    Ok(std::fs::File::open(path)?)
+}
 #[cfg(has_host_compiler_backend)]
 pub use crate::runtime::vm::sys::unwind::UnwindRegistration;
 pub use crate::runtime::vm::table::{Table, TableElementType};
@@ -167,6 +172,13 @@ cfg_if::cfg_if! {
 }
 
 /// Source of data used for [`MemoryImage`]
+#[cfg_attr(
+    not(has_virtual_memory),
+    expect(
+        dead_code,
+        reason = "CoW memory images are disabled without virtual memory"
+    )
+)]
 pub trait ModuleMemoryImageSource: Send + Sync + 'static {
     /// Returns this image's slice of all wasm data for a module which is then
     /// further sub-sliced for a particular initialization segment.

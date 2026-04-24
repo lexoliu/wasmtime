@@ -19,8 +19,13 @@
 use crate::runtime::vm::VMStore;
 use core::cell::Cell;
 use core::mem;
+#[cfg(not(feature = "std"))]
+use core::ptr;
 use core::ptr::NonNull;
+#[cfg(not(feature = "std"))]
+use core::sync::atomic::{AtomicPtr, Ordering};
 
+#[cfg(feature = "std")]
 std::thread_local! {
     // Note that care is currently taken to minimize the size of this TLS
     // variable as it's expected we'll refactor this in the future and have to
@@ -29,6 +34,9 @@ std::thread_local! {
     // a single pointer.
     static STORAGE: Cell<Option<NonNull<SetStorage>>> = const { Cell::new(None) };
 }
+
+#[cfg(not(feature = "std"))]
+static STORAGE: AtomicPtr<SetStorage> = AtomicPtr::new(ptr::null_mut());
 
 enum SetStorage {
     Present(NonNull<dyn VMStore>),
@@ -44,14 +52,14 @@ enum SetStorage {
 /// `f` is not allowed to access `store` via Rust's borrow checker.
 pub fn set<R>(store: &mut dyn VMStore, f: impl FnOnce() -> R) -> R {
     let mut storage = SetStorage::Present(NonNull::from(store));
-    let _reset = ResetTls(STORAGE.with(|s| s.replace(Some(NonNull::from(&mut storage)))));
+    let _reset = ResetTls(storage_replace(Some(NonNull::from(&mut storage))));
     return f();
 
     struct ResetTls(Option<NonNull<SetStorage>>);
 
     impl Drop for ResetTls {
         fn drop(&mut self) {
-            STORAGE.with(|s| s.set(self.0));
+            storage_replace(self.0);
         }
     }
 }
@@ -135,7 +143,7 @@ pub fn try_get<R>(f: impl FnOnce(TryGet<'_>) -> R) -> R {
     // With all of that put together it should make it such that this is a safe
     // reborrow of the store provided to `set` to pass to the closure `f` here.
     unsafe {
-        let storage = STORAGE.with(|s| s.get());
+        let storage = storage_get();
         let _reset;
         let val = match storage {
             Some(mut storage) => match mem::replace(storage.as_mut(), SetStorage::Taken) {
@@ -159,6 +167,29 @@ pub fn try_get<R>(f: impl FnOnce(TryGet<'_>) -> R) -> R {
             }
         }
     }
+}
+
+#[cfg(feature = "std")]
+fn storage_replace(value: Option<NonNull<SetStorage>>) -> Option<NonNull<SetStorage>> {
+    STORAGE.with(|s| s.replace(value))
+}
+
+#[cfg(not(feature = "std"))]
+fn storage_replace(value: Option<NonNull<SetStorage>>) -> Option<NonNull<SetStorage>> {
+    NonNull::new(STORAGE.swap(
+        value.map_or(ptr::null_mut(), NonNull::as_ptr),
+        Ordering::AcqRel,
+    ))
+}
+
+#[cfg(feature = "std")]
+fn storage_get() -> Option<NonNull<SetStorage>> {
+    STORAGE.with(Cell::get)
+}
+
+#[cfg(not(feature = "std"))]
+fn storage_get() -> Option<NonNull<SetStorage>> {
+    NonNull::new(STORAGE.load(Ordering::Acquire))
 }
 
 #[cfg(test)]

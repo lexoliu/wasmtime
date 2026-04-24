@@ -1,10 +1,35 @@
+use alloc::vec::Vec;
 #[cfg(feature = "component-model-async-bytes")]
 use bytes::{Bytes, BytesMut};
-#[cfg(feature = "component-model-async-bytes")]
-use std::io::Cursor;
-use std::mem::{self, MaybeUninit};
-use std::slice;
-use std::vec::Vec;
+use core::mem::{self, MaybeUninit};
+use core::slice;
+
+pub struct Cursor<T> {
+    inner: T,
+    position: u64,
+}
+
+impl<T> Cursor<T> {
+    pub fn new(inner: T) -> Self {
+        Self { inner, position: 0 }
+    }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
+    pub fn set_position(&mut self, position: u64) {
+        self.position = position;
+    }
+}
 
 // Inner module here to restrict possible readers of the fields of
 // `UntypedWriteBuffer`.
@@ -12,10 +37,10 @@ pub use untyped::*;
 mod untyped {
     use super::WriteBuffer;
     use crate::vm::SendSyncPtr;
-    use std::any::TypeId;
-    use std::marker;
-    use std::mem;
-    use std::ptr::NonNull;
+    use core::any::TypeId;
+    use core::marker;
+    use core::mem;
+    use core::ptr::NonNull;
 
     /// Helper structure to type-erase the `T` in `WriteBuffer<T>`.
     ///

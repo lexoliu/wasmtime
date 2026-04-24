@@ -10,6 +10,7 @@ use crate::component::{
     Val, WasmList,
 };
 use crate::store::{StoreOpaque, StoreToken};
+use crate::sync::{Mutex, MutexGuard};
 use crate::vm::component::{ComponentInstance, HandleTable, TransmitLocalState};
 use crate::vm::{AlwaysMut, VMStore};
 use crate::{AsContext, AsContextMut, StoreContextMut, ValRaw};
@@ -17,8 +18,13 @@ use crate::{
     Error, Result, Trap, bail, bail_bug, ensure,
     error::{Context as _, format_err},
 };
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use buffers::{Extender, SliceBuffer, UntypedWriteBuffer};
-use core::fmt;
+use core::any::{Any, TypeId};
 use core::future;
 use core::iter;
 use core::marker::PhantomData;
@@ -26,21 +32,16 @@ use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker, ready};
+use core::{cmp, fmt};
 use futures::channel::oneshot;
 use futures::{FutureExt as _, stream};
-use std::any::{Any, TypeId};
-use std::boxed::Box;
-use std::io::Cursor;
-use std::string::String;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::vec::Vec;
 use wasmtime_environ::component::{
     CanonicalAbiInfo, ComponentTypes, InterfaceType, OptionsIndex, RuntimeComponentInstanceIndex,
     TypeComponentGlobalErrorContextTableIndex, TypeComponentLocalErrorContextTableIndex,
     TypeFutureTableIndex, TypeStreamTableIndex,
 };
 
-pub use buffers::{ReadBuffer, VecBuffer, WriteBuffer};
+pub use buffers::{Cursor, ReadBuffer, VecBuffer, WriteBuffer};
 
 mod buffers;
 
@@ -186,7 +187,7 @@ impl PartialEq<u32> for ItemCount {
 }
 
 impl PartialOrd<u32> for ItemCount {
-    fn partial_cmp(&self, other: &u32) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &u32) -> Option<cmp::Ordering> {
         self.raw.partial_cmp(other)
     }
 }
@@ -458,6 +459,7 @@ pub struct DirectDestination<'a, D: 'static> {
     store: StoreContextMut<'a, D>,
 }
 
+#[cfg(feature = "std")]
 impl<D: 'static> std::io::Write for DirectDestination<'_, D> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let rem = self.remaining();
@@ -976,6 +978,7 @@ pub struct DirectSource<'a, D: 'static> {
     store: StoreContextMut<'a, D>,
 }
 
+#[cfg(feature = "std")]
 impl<D: 'static> std::io::Read for DirectSource<'_, D> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let rem = self.remaining();
@@ -3072,7 +3075,8 @@ async fn write<D: 'static, P: Send + 'static, T: func::Lower + 'static, B: Write
                                 },
                             ))))
                     });
-                    rx.await?
+                    rx.await
+                        .map_err(|_| crate::format_err!("worker function was canceled"))?
                 } else {
                     // Optimize flat payloads (i.e. those which do not
                     // require calling the guest's realloc function) by

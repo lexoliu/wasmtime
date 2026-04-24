@@ -28,6 +28,10 @@ pub struct CodeMemory {
     debug_registration: Option<crate::runtime::vm::GdbJitImageRegistration>,
     published: bool,
     registered: bool,
+    #[cfg_attr(
+        not(has_virtual_memory),
+        expect(dead_code, reason = "BTI is enforced while publishing virtual memory")
+    )]
     enable_branch_protection: bool,
     needs_executable: bool,
     #[cfg(feature = "debug-builtins")]

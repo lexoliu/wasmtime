@@ -6,6 +6,8 @@
 
 use once_cell::sync::OnceCell;
 use std::ops::{Deref, DerefMut};
+#[cfg(feature = "component-model-async")]
+use std::sync::TryLockError;
 
 /// This type is intended to mirror, and one day be implemented by, the
 /// `std::sync::OnceLock` type. At this time
@@ -33,6 +35,39 @@ impl<T> OnceLock<T> {
 impl<T> Default for OnceLock<T> {
     fn default() -> OnceLock<T> {
         OnceLock::new()
+    }
+}
+
+/// Small wrapper around `std::sync::Mutex` which undoes poisoning.
+#[cfg(feature = "component-model-async")]
+#[derive(Debug, Default)]
+pub struct Mutex<T>(std::sync::Mutex<T>);
+
+#[cfg(feature = "component-model-async")]
+pub type MutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+
+#[cfg(feature = "component-model-async")]
+impl<T> Mutex<T> {
+    #[inline]
+    pub const fn new(val: T) -> Mutex<T> {
+        Mutex(std::sync::Mutex::new(val))
+    }
+
+    #[inline]
+    pub fn lock(&self) -> Result<MutexGuard<'_, T>, ()> {
+        match self.0.lock() {
+            Ok(guard) => Ok(guard),
+            Err(poisoned) => Ok(poisoned.into_inner()),
+        }
+    }
+
+    #[inline]
+    pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, ()> {
+        match self.0.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => Err(()),
+        }
     }
 }
 

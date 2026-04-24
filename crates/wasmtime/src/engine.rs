@@ -13,6 +13,8 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(feature = "cranelift", feature = "winch"))]
 use object::write::{Object, StandardSegment};
+#[cfg(all(feature = "std", not(has_virtual_memory)))]
+use std::io::Read;
 #[cfg(feature = "std")]
 use std::{fs::File, path::Path};
 use wasmparser::WasmFeatures;
@@ -921,6 +923,14 @@ impl Engine {
         file: File,
         expected: ObjectKind,
     ) -> Result<Arc<crate::CodeMemory>> {
+        #[cfg(not(has_virtual_memory))]
+        {
+            let mut file = file;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            return self.load_code_bytes(&bytes, expected);
+        }
+        #[cfg(has_virtual_memory)]
         self.load_code(
             crate::runtime::vm::MmapVec::from_file(file)
                 .with_context(|| "Failed to create file mapping".to_string())?,

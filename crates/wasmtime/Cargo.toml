@@ -423,10 +423,14 @@ profile-pulley = [
 component-model-async = [
   "async",
   "component-model",
-  "std",
   "wasmtime-component-macro?/component-model-async",
   "dep:futures",
-  "futures/std",
+]
+
+# Enables compiling Component Model Async ABI artifacts without enabling
+# Wasmtime's async runtime/fiber support in the embedding process.
+component-model-async-compile = [
+  "component-model",
 ]
 
 # Enables support for `stream` interop with the `bytes` crate.

@@ -10,6 +10,8 @@ use crate::runtime::component::concurrent::{ResourcePair, SuspensionTarget};
 use crate::runtime::vm::component::{ComponentInstance, VMComponentContext};
 use crate::runtime::vm::{HostResultHasUnwindSentinel, VMStore, VmSafe};
 use core::cell::Cell;
+#[cfg(feature = "component-model-async")]
+use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::slice;
 use wasmtime_environ::component::*;
@@ -911,7 +913,7 @@ unsafe fn sync_start(
             callback.cast::<crate::vm::VMFuncRef>(),
             NonNull::new(callee).unwrap().cast::<crate::vm::VMFuncRef>(),
             param_count,
-            storage.cast::<std::mem::MaybeUninit<crate::ValRaw>>(),
+            storage.cast::<MaybeUninit<crate::ValRaw>>(),
             storage_len,
         )
     }

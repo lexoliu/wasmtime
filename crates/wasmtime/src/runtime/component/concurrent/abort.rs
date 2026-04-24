@@ -1,7 +1,9 @@
-use std::mem::{self, ManuallyDrop};
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use alloc::sync::Arc;
+use core::mem::{self, ManuallyDrop};
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
+
+use crate::sync::Mutex;
 
 /// Handle to a task which may be used to join on the result of executing it.
 ///
