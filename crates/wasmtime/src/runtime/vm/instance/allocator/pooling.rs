@@ -103,6 +103,7 @@ impl ShardId {
 /// dilution of per-shard warm-slot budgets, and per-shard memory
 /// overhead, while still being enough shards to make lock collisions
 /// rare given the very short critical sections involved.
+#[cfg(feature = "std")]
 pub(crate) fn default_shard_count() -> u32 {
     let n = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -111,15 +112,31 @@ pub(crate) fn default_shard_count() -> u32 {
     u32::try_from(n).unwrap()
 }
 
+/// On `no_std` there is no host thread pool to query and the runtime drives
+/// each store from a single cooperative context, so one shard suffices.
+#[cfg(not(feature = "std"))]
+pub(crate) fn default_shard_count() -> u32 {
+    1
+}
+
 /// Pick this thread's shard (used for both the sharded decommit queue and
 /// the sharded index allocators): assigned round-robin at first use per
 /// thread, cached in a thread-local.
+#[cfg(feature = "std")]
 pub(crate) fn thread_shard(nshards: usize) -> ShardId {
     static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
     std::thread_local! {
         static SHARD: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed);
     }
     ShardId::from_index(SHARD.with(|s| *s) % nshards)
+}
+
+/// On `no_std` there is a single cooperative execution context, so the home
+/// shard is always shard zero.
+#[cfg(not(feature = "std"))]
+pub(crate) fn thread_shard(nshards: usize) -> ShardId {
+    let _ = nshards;
+    ShardId::from_index(0)
 }
 
 /// Enumerate all shard ids for a sharded structure with `nshards` shards,
