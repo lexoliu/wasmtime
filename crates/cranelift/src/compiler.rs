@@ -577,12 +577,9 @@ impl wasmtime_environ::Compiler for Compiler {
             compiler.cx.debug_slot_descriptor = Some(slot_builder);
         }
 
-        #[cfg(not(target_os = "wasi"))]
-        {
-            let timing = cranelift_codegen::timing::take_current();
-            log::debug!("`{symbol}` translated to CLIF in {:?}", timing.total());
-            log::trace!("`{symbol}` timing info\n{timing}");
-        }
+        let timing = cranelift_codegen::timing::publish_current();
+        log::debug!("`{symbol}` translated to CLIF in {:?}", timing.total());
+        log::trace!("`{symbol}` timing info\n{timing}");
 
         Ok(CompiledFunctionBody {
             code: box_dyn_any_compiler_context(Some(compiler.cx)),
@@ -1074,12 +1071,9 @@ impl InliningCompiler for Compiler {
             compiler.finish(&symbol)?
         };
 
-        #[cfg(not(target_os = "wasi"))]
-        {
-            let timing = cranelift_codegen::timing::take_current();
-            log::debug!("`{symbol}` compiled in {:?}", timing.total());
-            log::trace!("`{symbol}` timing info\n{timing}");
-        }
+        let timing = cranelift_codegen::timing::publish_current();
+        log::debug!("`{symbol}` compiled in {:?}", timing.total());
+        log::trace!("`{symbol}` timing info\n{timing}");
 
         func_body.code = box_dyn_any_compiled_function(compiled_func);
         Ok(())
