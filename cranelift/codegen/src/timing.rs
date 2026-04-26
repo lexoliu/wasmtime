@@ -110,12 +110,12 @@ pub trait Profiler {
 /// The default profiler. You can get the results using [`take_current`].
 pub struct DefaultProfiler;
 
-#[cfg(not(feature = "timing"))]
+#[cfg(any(not(feature = "timing"), target_os = "wasi"))]
 pub(crate) use disabled::*;
-#[cfg(feature = "timing")]
+#[cfg(all(feature = "timing", not(target_os = "wasi")))]
 pub use enabled::*;
 
-#[cfg(feature = "timing")]
+#[cfg(all(feature = "timing", not(target_os = "wasi")))]
 mod enabled {
     use super::{DESCRIPTIONS, DefaultProfiler, NUM_PASSES, Pass, Profiler};
     use alloc::boxed::Box;
@@ -306,7 +306,7 @@ mod enabled {
     }
 }
 
-#[cfg(not(feature = "timing"))]
+#[cfg(any(not(feature = "timing"), target_os = "wasi"))]
 mod disabled {
     use super::{DefaultProfiler, Pass, Profiler};
     use alloc::boxed::Box;
