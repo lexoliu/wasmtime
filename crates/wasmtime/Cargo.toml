@@ -324,7 +324,7 @@ gc-copying = [
 threads = [
   "wasmtime-cranelift?/threads",
   "wasmtime-winch?/threads",
-  "std",
+  "wasmtime-environ/threads",
 ]
 
 stack-switching = [
