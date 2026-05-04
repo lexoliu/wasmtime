@@ -3,8 +3,8 @@
 use crate::hash_map::{Entry, HashMap};
 use crate::prelude::*;
 use crate::runtime::vm::CompiledModuleId;
-use std::mem;
-use std::sync::Mutex;
+use crate::sync::Mutex;
+use core::mem;
 use wasmtime_environ::DefinedMemoryIndex;
 
 /// A slot index.
@@ -514,7 +514,7 @@ impl List {
     ) -> impl Iterator<Item = SlotId> + 'a {
         let mut cur = self.head;
         let mut prev = None;
-        std::iter::from_fn(move || {
+        core::iter::from_fn(move || {
             if cur.is_none() {
                 assert_eq!(prev, self.tail);
             }
@@ -640,7 +640,7 @@ mod test {
     fn test_affinity_allocation_strategy_random() {
         let mut rng = rand::rng();
 
-        let ids = std::iter::repeat_with(|| {
+        let ids = core::iter::repeat_with(|| {
             MemoryInModule(CompiledModuleId::new(), DefinedMemoryIndex::new(0))
         })
         .take(10)

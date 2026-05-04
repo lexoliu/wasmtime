@@ -6,7 +6,7 @@
 use crate::PoolConcurrencyLimitError;
 use crate::prelude::*;
 use crate::runtime::vm::PoolingInstanceAllocatorConfig;
-use std::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// A generic implementation of a stack pool.
 ///
