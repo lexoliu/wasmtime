@@ -57,16 +57,13 @@ use crate::runtime::vm::{
     mpk::{self, ProtectionKey, ProtectionMask},
     sys::vm::PageMap,
 };
+use alloc::borrow::Cow;
 use core::future::Future;
+use core::fmt::{self, Display};
+use core::mem;
 use core::pin::Pin;
-use core::sync::atomic::AtomicUsize;
-use std::borrow::Cow;
-use std::fmt::Display;
-use std::sync::{Mutex, MutexGuard};
-use std::{
-    mem,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use crate::sync::{Mutex, MutexGuard};
 use wasmtime_environ::{
     DefinedMemoryIndex, DefinedTableIndex, HostPtr, MemoryKind, Module, Tunables, VMOffsets,
 };
@@ -167,7 +164,7 @@ pub struct PoolConcurrencyLimitError {
 impl core::error::Error for PoolConcurrencyLimitError {}
 
 impl Display for PoolConcurrencyLimitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let limit = self.limit;
         let kind = &self.kind;
         write!(f, "maximum concurrent limit of {limit} for {kind} reached")

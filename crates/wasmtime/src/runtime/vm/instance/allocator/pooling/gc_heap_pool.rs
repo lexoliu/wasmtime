@@ -4,7 +4,8 @@ use crate::config::PoolingAllocationConfig;
 use crate::runtime::vm::{GcHeap, GcRuntime, Result};
 use crate::vm::MemoryAllocationIndex;
 use crate::{Engine, prelude::*};
-use std::sync::Mutex;
+use core::fmt;
+use crate::sync::Mutex;
 use wasmtime_environ::Tunables;
 
 enum HeapSlot {
@@ -47,8 +48,8 @@ pub struct GcHeapPool {
     heaps: Mutex<Box<[HeapSlot]>>,
 }
 
-impl std::fmt::Debug for GcHeapPool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for GcHeapPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GcHeapPool")
             .field("max_gc_heaps", &self.max_gc_heaps)
             .field("index_allocator", &self.index_allocator)
