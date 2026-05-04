@@ -19,11 +19,7 @@
 use crate::runtime::vm::VMStore;
 use core::cell::Cell;
 use core::mem;
-#[cfg(not(feature = "std"))]
-use core::ptr;
 use core::ptr::NonNull;
-#[cfg(not(feature = "std"))]
-use core::sync::atomic::{AtomicPtr, Ordering};
 
 #[cfg(feature = "std")]
 std::thread_local! {
@@ -36,7 +32,10 @@ std::thread_local! {
 }
 
 #[cfg(not(feature = "std"))]
-static STORAGE: AtomicPtr<SetStorage> = AtomicPtr::new(ptr::null_mut());
+unsafe extern "C" {
+    fn wasmtime_component_tls_get() -> *mut u8;
+    fn wasmtime_component_tls_set(ptr: *mut u8);
+}
 
 enum SetStorage {
     Present(NonNull<dyn VMStore>),
@@ -176,10 +175,13 @@ fn storage_replace(value: Option<NonNull<SetStorage>>) -> Option<NonNull<SetStor
 
 #[cfg(not(feature = "std"))]
 fn storage_replace(value: Option<NonNull<SetStorage>>) -> Option<NonNull<SetStorage>> {
-    NonNull::new(STORAGE.swap(
-        value.map_or(ptr::null_mut(), NonNull::as_ptr),
-        Ordering::AcqRel,
-    ))
+    let previous = unsafe { wasmtime_component_tls_get() };
+    unsafe {
+        wasmtime_component_tls_set(
+            value.map_or(core::ptr::null_mut(), |value| value.as_ptr().cast::<u8>()),
+        );
+    }
+    NonNull::new(previous.cast())
 }
 
 #[cfg(feature = "std")]
@@ -189,7 +191,7 @@ fn storage_get() -> Option<NonNull<SetStorage>> {
 
 #[cfg(not(feature = "std"))]
 fn storage_get() -> Option<NonNull<SetStorage>> {
-    NonNull::new(STORAGE.load(Ordering::Acquire))
+    NonNull::new(unsafe { wasmtime_component_tls_get() }.cast())
 }
 
 #[cfg(test)]
