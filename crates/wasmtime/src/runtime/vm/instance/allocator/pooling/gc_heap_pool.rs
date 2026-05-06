@@ -1,10 +1,10 @@
 use super::GcHeapAllocationIndex;
 use super::index_allocator::{SimpleIndexAllocator, SlotId};
 use crate::runtime::vm::{GcHeap, GcRuntime, PoolingInstanceAllocatorConfig, Result};
+use crate::sync::Mutex;
 use crate::vm::{Memory, MemoryAllocationIndex};
 use crate::{Engine, prelude::*};
 use core::fmt;
-use crate::sync::Mutex;
 use wasmtime_environ::Tunables;
 
 enum HeapSlot {

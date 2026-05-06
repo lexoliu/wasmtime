@@ -55,13 +55,13 @@ use crate::runtime::vm::{
     mpk::{self, ProtectionKey, ProtectionMask},
     sys::vm::PageMap,
 };
+use crate::sync::{Mutex, MutexGuard};
 use alloc::borrow::Cow;
-use core::future::Future;
 use core::fmt::{self, Display};
+use core::future::Future;
 use core::mem;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use crate::sync::{Mutex, MutexGuard};
 use wasmtime_environ::{
     DefinedMemoryIndex, DefinedTableIndex, HostPtr, Module, Tunables, VMOffsets,
 };
