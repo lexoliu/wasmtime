@@ -124,6 +124,7 @@ mod enabled {
     use core::fmt;
     use core::mem;
     use core::time::Duration;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
     // Information about passes in a single thread.
@@ -216,6 +217,11 @@ mod enabled {
     thread_local! {
         static PASS_TIME: RefCell<PassTimes> = RefCell::new(Default::default());
     }
+    static GLOBAL_PASS_TIME: OnceLock<Mutex<PassTimes>> = OnceLock::new();
+
+    fn global_pass_time() -> &'static Mutex<PassTimes> {
+        GLOBAL_PASS_TIME.get_or_init(|| Mutex::new(PassTimes::default()))
+    }
 
     /// Take the current accumulated pass timings and reset the timings for the current thread.
     ///
@@ -231,6 +237,26 @@ mod enabled {
             "Cannot take_current() on profiler while a pass is active"
         );
         PASS_TIME.with(|rc| mem::take(&mut *rc.borrow_mut()))
+    }
+
+    /// Take the current thread's timings, reset them, and add them to the
+    /// process-wide aggregate used by embedding profilers.
+    pub fn publish_current() -> PassTimes {
+        let timing = take_current();
+        global_pass_time()
+            .lock()
+            .expect("global Cranelift pass timing lock was poisoned")
+            .add(&timing);
+        timing
+    }
+
+    /// Take all timings published by compiler worker threads.
+    pub fn take_global() -> PassTimes {
+        mem::take(
+            &mut *global_pass_time()
+                .lock()
+                .expect("global Cranelift pass timing lock was poisoned"),
+        )
     }
 
     // Information about passes in a single thread.
@@ -332,5 +358,31 @@ mod tests {
     fn display() {
         assert_eq!(Pass::None.to_string(), "<no pass>");
         assert_eq!(Pass::regalloc.to_string(), "Register allocation");
+    }
+
+    #[cfg(feature = "timing")]
+    #[test]
+    fn published_worker_timings_are_aggregated_and_reset() {
+        use core::time::Duration;
+
+        assert_eq!(take_global().total(), Duration::ZERO);
+
+        let workers = (0..2)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let token = regalloc();
+                    std::thread::sleep(Duration::from_millis(1));
+                    drop(token);
+                    publish_current().total()
+                })
+            })
+            .collect::<alloc::vec::Vec<_>>();
+        let expected = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .sum();
+
+        assert_eq!(take_global().total(), expected);
+        assert_eq!(take_global().total(), Duration::ZERO);
     }
 }
