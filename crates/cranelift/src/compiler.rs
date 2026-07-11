@@ -577,7 +577,7 @@ impl wasmtime_environ::Compiler for Compiler {
             compiler.cx.debug_slot_descriptor = Some(slot_builder);
         }
 
-        let timing = cranelift_codegen::timing::take_current();
+        let timing = cranelift_codegen::timing::publish_current();
         log::debug!("`{symbol}` translated to CLIF in {:?}", timing.total());
         log::trace!("`{symbol}` timing info\n{timing}");
 
@@ -1071,7 +1071,7 @@ impl InliningCompiler for Compiler {
             compiler.finish(&symbol)?
         };
 
-        let timing = cranelift_codegen::timing::take_current();
+        let timing = cranelift_codegen::timing::publish_current();
         log::debug!("`{symbol}` compiled in {:?}", timing.total());
         log::trace!("`{symbol}` timing info\n{timing}");
 
