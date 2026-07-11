@@ -15,7 +15,7 @@
 //! See a brief overview of this module in `sync_std.rs` as well.
 
 #![cfg_attr(
-    all(feature = "std", not(test)),
+    feature = "std",
     expect(dead_code, reason = "not used, but typechecked")
 )]
 
@@ -130,6 +130,65 @@ impl Drop for OnceLockGuard<'_> {
         // SAFETY: We acquired the lock in OnceLockGuard::acquire
         unsafe {
             self.lock.unlock();
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Mutex<T> {
+    val: UnsafeCell<T>,
+    lock: raw::Mutex,
+}
+
+unsafe impl<T: Send> Send for Mutex<T> {}
+unsafe impl<T: Send> Sync for Mutex<T> {}
+
+pub struct MutexGuard<'a, T> {
+    lock: &'a Mutex<T>,
+}
+
+impl<T> Mutex<T> {
+    pub const fn new(val: T) -> Mutex<T> {
+        Mutex {
+            val: UnsafeCell::new(val),
+            lock: raw::Mutex::new(),
+        }
+    }
+
+    pub fn lock(&self) -> Result<MutexGuard<'_, T>, ()> {
+        self.lock.lock();
+        Ok(MutexGuard { lock: self })
+    }
+}
+
+impl<T: Default> Default for Mutex<T> {
+    fn default() -> Mutex<T> {
+        Mutex::new(T::default())
+    }
+}
+
+impl<T> Deref for MutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: We hold the lock.
+        unsafe { &*self.lock.val.get() }
+    }
+}
+
+impl<T> DerefMut for MutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: We hold the lock.
+        unsafe { &mut *self.lock.val.get() }
+    }
+}
+
+impl<T> Drop for MutexGuard<'_, T> {
+    fn drop(&mut self) {
+        // SAFETY: This type represents a safe mutex lock being held, so it is
+        // safe to unlock here at the end.
+        unsafe {
+            self.lock.lock.unlock();
         }
     }
 }

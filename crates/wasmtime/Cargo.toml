@@ -301,7 +301,7 @@ gc-null = ["gc", "wasmtime-environ/gc-null"]
 gc-copying = ["gc", "wasmtime-environ/gc-copying"]
 
 # Enable runtime support for the WebAssembly threads proposal.
-threads = ["std"]
+threads = ["wasmtime-environ/threads"]
 
 stack-switching = [
   "runtime",
