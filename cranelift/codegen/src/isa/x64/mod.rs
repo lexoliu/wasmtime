@@ -170,6 +170,11 @@ impl TargetIsa for X64Backend {
         inst::regs::pretty_print_reg(reg, size)
     }
 
+    fn has_native_simd(&self) -> bool {
+        // SSE2 is an unconditional baseline of the x64 backend.
+        true
+    }
+
     fn has_native_fma(&self) -> bool {
         self.x64_flags.has_avx() && self.x64_flags.has_fma()
     }

@@ -4746,27 +4746,41 @@ impl FuncEnvironment<'_> {
         let store_flags = ir::MemFlagsData::trusted()
             .with_endianness(Endianness::Little)
             .with_alias_region(Some(dst_region));
-        const WIDTHS: &[(u64, ir::Type)] = &[
+        // The 16-byte `i8x16` chunk is only usable when the target backend can
+        // lower fixed 128-bit vector load/stores; RISC-V without the `V`
+        // extension cannot, so fall back to the scalar pointer width there.
+        const VECTOR_WIDTHS: &[(u64, ir::Type)] = &[
             (16, ir::types::I8X16),
             (8, ir::types::I64),
             (4, ir::types::I32),
             (2, ir::types::I16),
             (1, ir::types::I8),
         ];
-        // 12 covers the worst case under the 128-byte cap: n=127 decomposes into
-        // 7×i8x16 + i64 + i32 + i16 + i8 = 11 chunks. Sized so both `SmallVec`s
-        // stay inline.
-        let mut chunks: SmallVec<[(i32, ir::Type); 12]> = smallvec![];
+        const SCALAR_WIDTHS: &[(u64, ir::Type)] = &[
+            (8, ir::types::I64),
+            (4, ir::types::I32),
+            (2, ir::types::I16),
+            (1, ir::types::I8),
+        ];
+        let widths: &[(u64, ir::Type)] = if self.isa.has_native_simd() {
+            VECTOR_WIDTHS
+        } else {
+            SCALAR_WIDTHS
+        };
+        // 18 covers the worst case under the 128-byte cap: with the scalar
+        // fallback, n=127 decomposes into 15×i64 + i32 + i16 + i8 = 18 chunks
+        // (the vector path peaks lower). Sized so both `SmallVec`s stay inline.
+        let mut chunks: SmallVec<[(i32, ir::Type); 18]> = smallvec![];
         let mut offset = 0u64;
         let mut remaining = bytes;
-        for &(width, ty) in WIDTHS {
+        for &(width, ty) in widths {
             while remaining >= width {
                 chunks.push((i32::try_from(offset).unwrap(), ty));
                 offset += width;
                 remaining -= width;
             }
         }
-        let vals: SmallVec<[ir::Value; 12]> = chunks
+        let vals: SmallVec<[ir::Value; 18]> = chunks
             .iter()
             .map(|&(off, ty)| builder.ins().load(ty, load_flags, src_addr, off))
             .collect();

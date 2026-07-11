@@ -205,6 +205,11 @@ impl TargetIsa for AArch64Backend {
         inst::regs::pretty_print_reg(reg)
     }
 
+    fn has_native_simd(&self) -> bool {
+        // NEON is a baseline requirement of the aarch64 backend.
+        true
+    }
+
     fn has_native_fma(&self) -> bool {
         true
     }

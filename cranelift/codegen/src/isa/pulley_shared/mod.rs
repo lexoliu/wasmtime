@@ -222,6 +222,10 @@ where
         format!("{reg:?}")
     }
 
+    fn has_native_simd(&self) -> bool {
+        true
+    }
+
     fn has_native_fma(&self) -> bool {
         // The pulley interpreter does have fma opcodes.
         true
