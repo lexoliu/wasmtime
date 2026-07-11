@@ -199,6 +199,10 @@ impl TargetIsa for Riscv64Backend {
         format!("{reg:?}")
     }
 
+    fn has_native_simd(&self) -> bool {
+        self.isa_flags.has_v()
+    }
+
     fn has_native_fma(&self) -> bool {
         true
     }
