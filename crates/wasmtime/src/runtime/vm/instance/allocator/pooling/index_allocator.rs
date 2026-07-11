@@ -4,8 +4,8 @@ use super::ShardId;
 use crate::hash_map::{Entry, HashMap};
 use crate::prelude::*;
 use crate::runtime::vm::CompiledModuleId;
-use std::mem;
-use std::sync::Mutex;
+use crate::sync::Mutex;
+use core::mem;
 use wasmtime_environ::DefinedMemoryIndex;
 
 /// A slot index.
@@ -335,7 +335,7 @@ impl ModuleAffinityIndexAllocator {
     pub fn len(&self) -> usize {
         self.shards
             .iter()
-            .map(|s| s.0.lock().unwrap().slot_state.len())
+            .map(|s| s.0.lock().slot_state.len())
             .sum()
     }
 
@@ -343,7 +343,6 @@ impl ModuleAffinityIndexAllocator {
     pub fn is_empty(&self) -> bool {
         self.shards.iter().all(|s| {
             !s.0.lock()
-                .unwrap()
                 .slot_state
                 .iter()
                 .any(|state| matches!(state, SlotState::Used(_)))
@@ -359,7 +358,7 @@ impl ModuleAffinityIndexAllocator {
         // it's fully allocated. In steady state this means each thread
         // stays on its own shard.
         for shard in super::shard_ids_from_home(self.shards.len()) {
-            let mut inner = self.shard(shard).lock().unwrap();
+            let mut inner = self.shard(shard).lock();
             if let Some((local, _)) = Self::alloc_within(&mut inner, for_memory, AllocMode::AnySlot)
             {
                 return Some(self.global_id(shard, local));
@@ -383,7 +382,7 @@ impl ModuleAffinityIndexAllocator {
         // Affine slots for this module may live in any shard, so consult
         // them all. This is a module-teardown path, not a hot path.
         for shard in self.shard_ids() {
-            let mut inner = self.shard(shard).lock().unwrap();
+            let mut inner = self.shard(shard).lock();
             if let Some((local, _)) = Self::alloc_within(
                 &mut inner,
                 Some(MemoryInModule(module_id, memory_index)),
@@ -469,7 +468,7 @@ impl ModuleAffinityIndexAllocator {
 
     pub(crate) fn free(&self, index: SlotId, bytes_resident: usize) {
         let (shard, local) = self.shard_of(index);
-        let mut inner = self.shard(shard).lock().unwrap();
+        let mut inner = self.shard(shard).lock();
         Self::free_locked(&mut inner, local, bytes_resident);
     }
 
@@ -487,7 +486,7 @@ impl ModuleAffinityIndexAllocator {
             if items.is_empty() {
                 continue;
             }
-            let mut inner = self.shard(ShardId::from_index(shard)).lock().unwrap();
+            let mut inner = self.shard(ShardId::from_index(shard)).lock();
             for (local, bytes_resident) in items {
                 Self::free_locked(&mut inner, local, bytes_resident);
             }
@@ -541,7 +540,7 @@ impl ModuleAffinityIndexAllocator {
         self.shards
             .iter()
             .map(|s| {
-                let inner = s.0.lock().unwrap();
+                let inner = s.0.lock();
                 let total_slots = inner.slot_state.len();
                 (total_slots - inner.last_cold as usize) + inner.unused_warm_slots as usize
             })
@@ -554,7 +553,7 @@ impl ModuleAffinityIndexAllocator {
     pub(crate) fn testing_freelist(&self) -> Vec<SlotId> {
         self.shard_ids()
             .flat_map(|shard| {
-                let inner = self.shard(shard).lock().unwrap();
+                let inner = self.shard(shard).lock();
                 inner
                     .warm
                     .iter(&inner.slot_state, |s| &s.unused_list_link)
@@ -570,7 +569,7 @@ impl ModuleAffinityIndexAllocator {
     pub(crate) fn testing_module_affinity_list(&self) -> Vec<MemoryInModule> {
         let mut ret = Vec::new();
         for s in self.shards.iter() {
-            let inner = s.0.lock().unwrap();
+            let inner = s.0.lock();
             for key in inner.module_affine.keys() {
                 if !ret.contains(key) {
                     ret.push(*key);
@@ -588,7 +587,7 @@ impl ModuleAffinityIndexAllocator {
     pub fn unused_warm_slots(&self) -> u32 {
         self.shards
             .iter()
-            .map(|s| s.0.lock().unwrap().unused_warm_slots)
+            .map(|s| s.0.lock().unused_warm_slots)
             .sum()
     }
 
@@ -604,7 +603,7 @@ impl ModuleAffinityIndexAllocator {
     pub(crate) fn take_resident_warm_slots(&self) -> Vec<(SlotId, usize)> {
         let mut taken = Vec::new();
         for (shard_index, shard) in self.shards.iter().enumerate() {
-            let mut inner = shard.0.lock().unwrap();
+            let mut inner = shard.0.lock();
             while let Some((slot, bytes_resident)) =
                 Self::alloc_within(&mut inner, None, AllocMode::AnyWarm)
             {
@@ -625,7 +624,7 @@ impl ModuleAffinityIndexAllocator {
     pub fn unused_bytes_resident(&self) -> usize {
         self.shards
             .iter()
-            .map(|s| s.0.lock().unwrap().unused_bytes_resident)
+            .map(|s| s.0.lock().unused_bytes_resident)
             .sum()
     }
 }
@@ -756,7 +755,7 @@ impl List {
     ) -> impl Iterator<Item = SlotId> + 'a {
         let mut cur = self.head;
         let mut prev = None;
-        std::iter::from_fn(move || {
+        core::iter::from_fn(move || {
             if cur.is_none() {
                 assert_eq!(prev, self.tail);
             }
@@ -908,7 +907,7 @@ mod test {
     fn test_affinity_allocation_strategy_random() {
         let mut rng = rand::rng();
 
-        let ids = std::iter::repeat_with(|| {
+        let ids = core::iter::repeat_with(|| {
             MemoryInModule(CompiledModuleId::new(), DefinedMemoryIndex::new(0))
         })
         .take(10)

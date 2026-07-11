@@ -58,16 +58,13 @@ use crate::runtime::vm::{
     mpk::{self, ProtectionKey, ProtectionMask},
     sys::vm::PageMap,
 };
+use crate::sync::{Mutex, MutexGuard};
+use alloc::borrow::Cow;
+use core::fmt::{self, Display};
 use core::future::Future;
+use core::mem;
 use core::pin::Pin;
-use core::sync::atomic::AtomicUsize;
-use std::borrow::Cow;
-use std::fmt::Display;
-use std::sync::{Mutex, MutexGuard};
-use std::{
-    mem,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use wasmtime_environ::{
     DefinedMemoryIndex, DefinedTableIndex, HostPtr, MemoryKind, Module, Tunables, VMOffsets,
 };
@@ -107,6 +104,7 @@ impl ShardId {
 /// dilution of per-shard warm-slot budgets, and per-shard memory
 /// overhead, while still being enough shards to make lock collisions
 /// rare given the very short critical sections involved.
+#[cfg(feature = "std")]
 pub(crate) fn default_shard_count() -> u32 {
     let n = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -115,15 +113,31 @@ pub(crate) fn default_shard_count() -> u32 {
     u32::try_from(n).unwrap()
 }
 
+/// On `no_std` there is no host thread pool to query and the runtime drives
+/// each store from a single cooperative context, so one shard suffices.
+#[cfg(not(feature = "std"))]
+pub(crate) fn default_shard_count() -> u32 {
+    1
+}
+
 /// Pick this thread's shard (used for both the sharded decommit queue and
 /// the sharded index allocators): assigned round-robin at first use per
 /// thread, cached in a thread-local.
+#[cfg(feature = "std")]
 pub(crate) fn thread_shard(nshards: usize) -> ShardId {
     static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
     std::thread_local! {
         static SHARD: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed);
     }
     ShardId::from_index(SHARD.with(|s| *s) % nshards)
+}
+
+/// On `no_std` there is a single cooperative execution context, so the home
+/// shard is always shard zero.
+#[cfg(not(feature = "std"))]
+pub(crate) fn thread_shard(nshards: usize) -> ShardId {
+    let _ = nshards;
+    ShardId::from_index(0)
 }
 
 /// Enumerate all shard ids for a sharded structure with `nshards` shards,
@@ -162,7 +176,7 @@ pub struct PoolConcurrencyLimitError {
 impl core::error::Error for PoolConcurrencyLimitError {}
 
 impl Display for PoolConcurrencyLimitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let limit = self.limit;
         let kind = &self.kind;
         write!(f, "maximum concurrent limit of {limit} for {kind} reached")
@@ -429,7 +443,7 @@ impl PoolingInstanceAllocator {
     fn flush_all_decommit_queues(&self) -> bool {
         let mut any = false;
         for shard in self.decommit_shard_ids() {
-            let queue = self.decommit_queue(shard).lock().unwrap();
+            let queue = self.decommit_queue(shard).lock();
             any |= self.flush_decommit_queue(queue);
         }
         any
@@ -457,7 +471,7 @@ impl PoolingInstanceAllocator {
                 Err(e) if e.is::<PoolConcurrencyLimitError>() => {}
                 _ => break,
             }
-            let queue = self.decommit_queue(shard).lock().unwrap();
+            let queue = self.decommit_queue(shard).lock();
             if self.flush_decommit_queue(queue) {
                 result = f();
             }
@@ -488,7 +502,7 @@ impl PoolingInstanceAllocator {
             n => {
                 debug_assert!(n < self.config.decommit_batch_size);
                 let shard = thread_shard(self.decommit_queues.len());
-                let mut shared_queue = self.decommit_queue(shard).lock().unwrap();
+                let mut shared_queue = self.decommit_queue(shard).lock();
                 shared_queue.append(&mut local_queue);
                 // And if this shard now has at least as many regions enqueued
                 // for decommit as our batch size, then we can flush it.
@@ -650,7 +664,7 @@ unsafe impl InstanceAllocator for PoolingInstanceAllocator {
                     if !e.is::<PoolConcurrencyLimitError>() {
                         break;
                     }
-                    let queue = self.decommit_queue(shard).lock().unwrap();
+                    let queue = self.decommit_queue(shard).lock();
                     if self.flush_decommit_queue(queue) {
                         match self.memories.allocate(request, ty, memory_index).await {
                             Ok(result) => return Ok(result),
@@ -745,7 +759,7 @@ unsafe impl InstanceAllocator for PoolingInstanceAllocator {
                     if !e.is::<PoolConcurrencyLimitError>() {
                         break;
                     }
-                    let queue = self.decommit_queue(shard).lock().unwrap();
+                    let queue = self.decommit_queue(shard).lock();
                     if self.flush_decommit_queue(queue) {
                         match self.tables.allocate(request, ty).await {
                             Ok(result) => return Ok(result),
