@@ -218,7 +218,6 @@ async = [
 # Enables support for the pooling instance allocation strategy
 pooling-allocator = [
   "runtime",
-  "std",                 # not ported to no_std yet
 ]
 
 # Enables support for all architectures in Cranelift, allowing

@@ -42,7 +42,10 @@ pub struct iovec {
 }
 
 #[cfg(feature = "pooling-allocator")]
-pub unsafe fn decommit_pages(addr: *mut u8, len: usize) -> Result<()> {
+pub unsafe fn decommit_pages(iov: &[iovec]) -> Result<()> {
+    // Match the unix backend's batched signature so the shared decommit
+    // queue has one call site; helios remaps each region back to an
+    // anonymous zero mapping individually.
     for iov in iov {
         if iov.iov_len == 0 {
             continue;
@@ -50,13 +53,13 @@ pub unsafe fn decommit_pages(addr: *mut u8, len: usize) -> Result<()> {
 
         unsafe {
             cvt(capi::wasmtime_mmap_remap(
-                iov.iov_addr,
+                iov.iov_base,
                 iov.iov_len,
                 capi::PROT_READ | capi::PROT_WRITE,
             ))?;
         }
-        Ok(())
     }
+    Ok(())
 }
 
 pub fn get_page_size() -> usize {
