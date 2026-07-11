@@ -6,10 +6,11 @@ use crate::runtime::vm::send_sync_ptr::SendSyncPtr;
 use crate::runtime::vm::{Mmap, mmap::UnalignedLength};
 #[cfg(not(has_virtual_memory))]
 use alloc::alloc::Layout;
+#[cfg(all(feature = "std", has_virtual_memory))]
 use alloc::sync::Arc;
 use core::ops::{Deref, Range};
 use core::ptr::NonNull;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", has_virtual_memory))]
 use std::fs::File;
 
 /// A type which prefers to store backing memory in an OS-backed memory mapping
@@ -189,7 +190,7 @@ impl MmapVec {
     /// The file is mapped into memory with a "private mapping" meaning that
     /// changes are not persisted back to the file itself and are only visible
     /// within this process.
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", has_virtual_memory))]
     pub fn from_file(file: File) -> Result<MmapVec> {
         let file = Arc::new(file);
         let mmap = Mmap::from_file(Arc::clone(&file))
@@ -246,7 +247,7 @@ impl MmapVec {
     }
 
     /// Returns the underlying file that this mmap is mapping, if present.
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", has_virtual_memory))]
     pub fn original_file(&self) -> Option<&Arc<File>> {
         match self {
             #[cfg(not(has_virtual_memory))]

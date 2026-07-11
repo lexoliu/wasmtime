@@ -346,16 +346,31 @@ impl Module {
     /// state of the file.
     #[cfg(all(feature = "std", any(feature = "cranelift", feature = "winch")))]
     pub unsafe fn from_trusted_file(engine: &Engine, file: impl AsRef<Path>) -> Result<Module> {
-        let open_file = open_file_for_mmap(file.as_ref())?;
-        let mmap = crate::runtime::vm::MmapVec::from_file(open_file)?;
-        if &mmap[0..4] == b"\x7fELF" {
-            let code = engine.load_code(mmap, ObjectKind::Module)?;
-            return Module::from_parts(engine, code, None);
-        }
+        #[cfg(not(has_virtual_memory))]
+        {
+            let bytes = std::fs::read(file.as_ref())?;
+            if &bytes[0..4] == b"\x7fELF" {
+                let code = engine.load_code_bytes(&bytes, ObjectKind::Module)?;
+                return Module::from_parts(engine, code, None);
+            }
 
-        crate::CodeBuilder::new(engine)
-            .wasm_binary_or_text(&mmap[..], Some(file.as_ref()))?
-            .compile_module()
+            return crate::CodeBuilder::new(engine)
+                .wasm_binary_or_text(&bytes, Some(file.as_ref()))?
+                .compile_module();
+        }
+        #[cfg(has_virtual_memory)]
+        {
+            let open_file = open_file_for_mmap(file.as_ref())?;
+            let mmap = crate::runtime::vm::MmapVec::from_file(open_file)?;
+            if &mmap[0..4] == b"\x7fELF" {
+                let code = engine.load_code(mmap, ObjectKind::Module)?;
+                return Module::from_parts(engine, code, None);
+            }
+
+            crate::CodeBuilder::new(engine)
+                .wasm_binary_or_text(&mmap[..], Some(file.as_ref()))?
+                .compile_module()
+        }
     }
 
     /// Deserializes an in-memory compiled module previously created with
