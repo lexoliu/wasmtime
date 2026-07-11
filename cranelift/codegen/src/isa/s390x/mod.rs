@@ -177,6 +177,11 @@ impl TargetIsa for S390xBackend {
         inst::regs::pretty_print_reg(reg)
     }
 
+    fn has_native_simd(&self) -> bool {
+        // The vector facility is a baseline requirement of the s390x backend.
+        true
+    }
+
     fn has_native_fma(&self) -> bool {
         true
     }
