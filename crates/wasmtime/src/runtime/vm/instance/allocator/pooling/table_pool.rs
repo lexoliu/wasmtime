@@ -8,7 +8,7 @@ use crate::runtime::vm::{
     InstanceAllocationRequest, Mmap, SendSyncPtr, Table, mmap::AlignedLength,
 };
 use crate::{prelude::*, vm::HostAlignedByteCount};
-use std::ptr::NonNull;
+use core::ptr::{self, NonNull};
 use wasmtime_environ::Module;
 
 /// Represents a pool of WebAssembly tables.
@@ -155,7 +155,7 @@ impl TablePool {
             commit_pages(base, data_size)?;
         }
 
-        let ptr = NonNull::new(std::ptr::slice_from_raw_parts_mut(base.cast(), data_size)).unwrap();
+        let ptr = NonNull::new(ptr::slice_from_raw_parts_mut(base.cast(), data_size)).unwrap();
         let table = unsafe {
             Table::new_static(
                 ty,
