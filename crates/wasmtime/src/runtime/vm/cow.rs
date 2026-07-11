@@ -700,8 +700,13 @@ impl MemoryImageSlot {
             return Ok(());
         }
 
+        // Helios AArch64/HVF QuickJS profiling showed Store drop spending
+        // about 18 ms/run here when the custom VM hook scanned a whole static
+        // reservation to remap anonymous memory. Only the accessible prefix can
+        // contain committed dirty pages; the reserved tail is already
+        // inaccessible and does not need to be remapped on slot reuse.
         unsafe {
-            vm::erase_existing_mapping(self.base.as_mut_ptr(), self.static_size)?;
+            vm::erase_existing_mapping(self.base.as_mut_ptr(), self.accessible.byte_count())?;
         }
 
         self.image = None;
