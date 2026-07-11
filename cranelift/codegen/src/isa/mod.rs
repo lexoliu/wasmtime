@@ -388,6 +388,17 @@ pub trait TargetIsa: fmt::Display + Send + Sync {
     /// not detected.
     fn has_native_fma(&self) -> bool;
 
+    /// Returns whether this ISA can lower fixed-width 128-bit SIMD vector
+    /// types (loads, stores, and the basic bitwise moves used by
+    /// element-agnostic byte copies).
+    ///
+    /// This is a hard baseline on x86-64 (SSE2), aarch64 (NEON), s390x
+    /// (vector facility), and Pulley, but is gated behind the `V` extension
+    /// on RISC-V. Callers that emit `i8x16` accesses opportunistically (for
+    /// example inline constant-length copies) must fall back to scalar widths
+    /// when this returns `false`.
+    fn has_native_simd(&self) -> bool;
+
     /// Returns whether this ISA has instructions for `ceil`, `floor`, etc.
     fn has_round(&self) -> bool;
 
