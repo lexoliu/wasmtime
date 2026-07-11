@@ -6,25 +6,39 @@
 use crate::PoolConcurrencyLimitError;
 use crate::config::PoolingAllocationConfig;
 use crate::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(feature = "std"))]
+use crate::sync::Mutex;
+use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "std")]
+use std::sync::Mutex;
 
 /// A generic implementation of a stack pool.
 ///
-/// This implementation technically doesn't actually pool anything at this time.
-/// Originally this was the implementation for non-Unix (e.g. Windows and
-/// MIRI), but nowadays this is also used for fuzzing. For more documentation
-/// for why this is used on fuzzing see the `asan` module in the
-/// `wasmtime-fiber` crate.
-///
-/// Currently the only purpose of `StackPool` is to limit the total number of
-/// concurrent stacks while otherwise leveraging `wasmtime_fiber::FiberStack`
-/// natively.
-#[derive(Debug)]
+/// This implementation is used by targets that cannot reserve one large
+/// Unix-style stack mapping. It still keeps a bounded warm stack list so async
+/// core-module startup does not allocate and free a large fiber stack on every
+/// store drop.
 pub struct StackPool {
     stack_size: usize,
     stack_zeroing: bool,
     live_stacks: AtomicU64,
     stack_limit: u64,
+    max_unused_warm_slots: usize,
+    unused_stacks: Mutex<Vec<wasmtime_fiber::FiberStack>>,
+}
+
+impl fmt::Debug for StackPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StackPool")
+            .field("stack_size", &self.stack_size)
+            .field("stack_zeroing", &self.stack_zeroing)
+            .field("live_stacks", &self.live_stacks)
+            .field("stack_limit", &self.stack_limit)
+            .field("max_unused_warm_slots", &self.max_unused_warm_slots)
+            .field("unused_warm_slots", &self.unused_warm_slots())
+            .finish()
+    }
 }
 
 impl StackPool {
@@ -39,6 +53,8 @@ impl StackPool {
             stack_zeroing: config.async_stack_zeroing,
             live_stacks: AtomicU64::new(0),
             stack_limit: config.limits.total_stacks.into(),
+            max_unused_warm_slots: usize::try_from(config.max_unused_warm_slots).unwrap(),
+            unused_stacks: Mutex::new(Vec::new()),
         })
     }
 
@@ -59,6 +75,15 @@ impl StackPool {
                 "fibers",
             )
             .into());
+        }
+
+        if let Some(stack) = self
+            .unused_stacks
+            .lock()
+            .expect("generic stack pool mutex must not fail")
+            .pop()
+        {
+            return Ok(stack);
         }
 
         match wasmtime_fiber::FiberStack::new(self.stack_size, self.stack_zeroing) {
@@ -90,8 +115,13 @@ impl StackPool {
     /// Safety: see the unix implementation.
     pub unsafe fn deallocate(&self, stack: wasmtime_fiber::FiberStack, _bytes_resident: usize) {
         self.live_stacks.fetch_sub(1, Ordering::AcqRel);
-        // A no-op as we don't actually own the fiber stack on Windows.
-        let _ = stack;
+        let mut unused_stacks = self
+            .unused_stacks
+            .lock()
+            .expect("generic stack pool mutex must not fail");
+        if unused_stacks.len() < self.max_unused_warm_slots && !self.stack_zeroing {
+            unused_stacks.push(stack);
+        }
     }
 
     /// Safety: see the unix implementation.
@@ -107,10 +137,51 @@ impl StackPool {
     }
 
     pub fn unused_warm_slots(&self) -> u32 {
-        0
+        self.unused_stacks
+            .lock()
+            .expect("generic stack pool mutex must not fail")
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX)
     }
 
     pub fn unused_bytes_resident(&self) -> Option<usize> {
         None
+    }
+}
+
+// This pool is the live implementation only on non-unix targets; a test
+// exercising it on unix would defeat the module's `expect(dead_code)`.
+#[cfg(all(test, not(unix), not(miri), not(asan)))]
+mod tests {
+    use super::*;
+    use crate::runtime::vm::InstanceLimits;
+
+    #[test]
+    fn reuses_warm_stack_slots() {
+        let config = PoolingAllocationConfig {
+            max_unused_warm_slots: 1,
+            stack_size: 64 * 1024,
+            async_stack_zeroing: false,
+            limits: InstanceLimits {
+                total_stacks: 4,
+                ..Default::default()
+            },
+            ..PoolingAllocationConfig::default()
+        };
+
+        let pool = StackPool::new(&config).unwrap();
+        let first = pool.allocate().unwrap();
+        let first_top = first.top();
+        unsafe {
+            pool.deallocate(first, 0);
+        }
+
+        assert_eq!(pool.unused_warm_slots(), 1);
+        let second = pool.allocate().unwrap();
+        assert_eq!(second.top(), first_top);
+        unsafe {
+            pool.deallocate(second, 0);
+        }
     }
 }
