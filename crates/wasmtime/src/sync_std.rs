@@ -38,15 +38,33 @@ impl<T> Default for OnceLock<T> {
 
 /// Small wrapper around `std::sync::Mutex` which undoes poisoning.
 #[cfg_attr(
-    not(feature = "component-model-async"),
-    expect(dead_code, reason = "only used by component-model-async at this time")
+    not(any(
+        feature = "component-model-async",
+        feature = "pooling-allocator",
+        feature = "threads"
+    )),
+    expect(dead_code, reason = "only used by async/pooling/threads features")
 )]
 #[derive(Debug, Default)]
 pub struct Mutex<T>(std::sync::Mutex<T>);
 
 #[cfg_attr(
-    not(feature = "component-model-async"),
-    expect(dead_code, reason = "only used by component-model-async at this time")
+    not(any(
+        feature = "component-model-async",
+        feature = "pooling-allocator",
+        feature = "threads"
+    )),
+    expect(dead_code, reason = "only used by async/pooling/threads features")
+)]
+pub type MutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+
+#[cfg_attr(
+    not(any(
+        feature = "component-model-async",
+        feature = "pooling-allocator",
+        feature = "threads"
+    )),
+    expect(dead_code, reason = "only used by async/pooling/threads features")
 )]
 impl<T> Mutex<T> {
     #[inline]
@@ -55,7 +73,7 @@ impl<T> Mutex<T> {
     }
 
     #[inline]
-    pub fn lock(&self) -> impl DerefMut<Target = T> + '_ {
+    pub fn lock(&self) -> MutexGuard<'_, T> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }

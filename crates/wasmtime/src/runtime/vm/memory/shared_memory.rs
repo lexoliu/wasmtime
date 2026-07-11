@@ -1,14 +1,17 @@
-use crate::Engine;
 use crate::prelude::*;
-use crate::runtime::vm::memory::{LocalMemory, MmapMemory, validate_atomic_addr};
+use crate::runtime::vm::memory::{DefaultMemoryCreator, LocalMemory, validate_atomic_addr};
 use crate::runtime::vm::parking_spot::{ParkingSpot, Waiter};
 use crate::runtime::vm::{self, Memory, VMMemoryDefinition, WaitResult};
-use std::cell::RefCell;
-use std::ops::Range;
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use crate::sync::RwLock;
+use crate::{Engine, MemoryCreator, MemoryRequest};
+use alloc::sync::Arc;
+use core::mem;
+use core::ops::Range;
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::time::Duration;
+#[cfg(feature = "std")]
+use std::time::Instant;
 use wasmtime_environ::Trap;
 
 /// For shared memory (and only for shared memory), this lock-version restricts
@@ -40,8 +43,16 @@ impl SharedMemory {
         // Note that without a limiter being passed to `limit_new` this
         // `assert_ready` should never panic.
         let (minimum_bytes, maximum_bytes) = vm::assert_ready(Memory::limit_new(ty, None))?;
-        let mmap_memory = MmapMemory::new(ty, &memory_tunables, minimum_bytes, maximum_bytes)?;
-        let boxed: Box<dyn crate::LinearMemory> = try_new::<Box<_>>(mmap_memory)?;
+        let default_creator;
+        let creator: &dyn MemoryCreator = match &engine.config().mem_creator {
+            Some(creator) => &**creator,
+            None => {
+                default_creator = DefaultMemoryCreator;
+                &default_creator
+            }
+        };
+        let request = MemoryRequest::new(ty, &memory_tunables, minimum_bytes, maximum_bytes);
+        let boxed = creator.new_memory(&request)?;
         Self::wrap(
             engine,
             ty,
@@ -88,7 +99,7 @@ impl SharedMemory {
 
     /// Same as `LocalMemory::grow`, except with `&self`.
     pub fn grow(&self, delta_pages: u64) -> Result<Option<(usize, usize)>, Error> {
-        let mut memory = self.0.memory.write().unwrap();
+        let mut memory = self.0.memory.write();
         // Without a limiter being passed in this shouldn't have an await point,
         // so it should be safe to assert that it's ready.
         let result = vm::assert_ready(memory.grow(delta_pages, None))?;
@@ -142,8 +153,8 @@ impl SharedMemory {
         );
 
         // SAFETY: `addr_index` was validated by `validate_atomic_addr` above.
-        assert!(std::mem::size_of::<AtomicU32>() == 4);
-        assert!(std::mem::align_of::<AtomicU32>() <= 4);
+        assert!(mem::size_of::<AtomicU32>() == 4);
+        assert!(mem::align_of::<AtomicU32>() <= 4);
         let atomic = unsafe { AtomicU32::from_ptr(addr.cast()) };
         // Wasm linear memory is always little-endian, but `AtomicU32` uses the
         // host's native endianness.
@@ -153,12 +164,13 @@ impl SharedMemory {
         // it'll cause there to be no timeout at all if we can't represent the
         // deadline. That effectively maps to the requested timeout since if we
         // can't represent the deadline we'll be here awhile.
+        #[cfg(feature = "std")]
         let deadline = timeout.and_then(|d| Instant::now().checked_add(d));
+        #[cfg(not(feature = "std"))]
+        let deadline = timeout;
 
-        WAITER.with(|waiter| {
-            let mut waiter = waiter.borrow_mut();
-            Ok(self.0.spot.wait32(atomic, expected, deadline, &mut waiter))
-        })
+        let mut waiter = Waiter::new();
+        Ok(self.0.spot.wait32(atomic, expected, deadline, &mut waiter))
     }
 
     /// Implementation of `memory.atomic.wait64` for this shared memory.
@@ -174,39 +186,34 @@ impl SharedMemory {
         );
 
         // SAFETY: `addr_index` was validated by `validate_atomic_addr` above.
-        assert!(std::mem::size_of::<AtomicU64>() == 8);
-        assert!(std::mem::align_of::<AtomicU64>() <= 8);
+        assert!(mem::size_of::<AtomicU64>() == 8);
+        assert!(mem::align_of::<AtomicU64>() <= 8);
         let atomic = unsafe { AtomicU64::from_ptr(addr.cast()) };
         // Wasm linear memory is always little-endian, but `AtomicU64` uses the
         // host's native endianness.
         let expected = expected.to_le();
 
         // See `atomic_wait32` for why this is using `checked_add`.
+        #[cfg(feature = "std")]
         let deadline = timeout.and_then(|d| Instant::now().checked_add(d));
+        #[cfg(not(feature = "std"))]
+        let deadline = timeout;
 
-        WAITER.with(|waiter| {
-            let mut waiter = waiter.borrow_mut();
-            Ok(self.0.spot.wait64(atomic, expected, deadline, &mut waiter))
-        })
+        let mut waiter = Waiter::new();
+        Ok(self.0.spot.wait64(atomic, expected, deadline, &mut waiter))
     }
 
     pub(crate) fn byte_size(&self) -> usize {
-        self.0.memory.read().unwrap().byte_size()
+        self.0.memory.read().byte_size()
     }
 
     pub(crate) fn needs_init(&self) -> bool {
-        self.0.memory.read().unwrap().needs_init()
+        self.0.memory.read().needs_init()
     }
 
     pub(crate) fn wasm_accessible(&self) -> Range<usize> {
-        self.0.memory.read().unwrap().wasm_accessible()
+        self.0.memory.read().wasm_accessible()
     }
-}
-
-thread_local! {
-    /// Structure used in conjunction with `ParkingSpot` to block the current
-    /// thread if necessary. Note that this is lazily initialized.
-    static WAITER: RefCell<Waiter> = const { RefCell::new(Waiter::new()) };
 }
 
 /// Shared memory needs some representation of a `VMMemoryDefinition` for

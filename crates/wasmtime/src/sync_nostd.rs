@@ -15,7 +15,7 @@
 //! See a brief overview of this module in `sync_std.rs` as well.
 
 #![cfg_attr(
-    all(feature = "std", not(test)),
+    feature = "std",
     expect(dead_code, reason = "not used, but typechecked")
 )]
 
@@ -143,6 +143,10 @@ pub struct Mutex<T> {
 unsafe impl<T: Send> Send for Mutex<T> {}
 unsafe impl<T: Send> Sync for Mutex<T> {}
 
+pub struct MutexGuard<'a, T> {
+    lock: &'a Mutex<T>,
+}
+
 impl<T> Mutex<T> {
     pub const fn new(val: T) -> Mutex<T> {
         Mutex {
@@ -151,7 +155,7 @@ impl<T> Mutex<T> {
         }
     }
 
-    pub fn lock(&self) -> impl DerefMut<Target = T> + '_ {
+    pub fn lock(&self) -> MutexGuard<'_, T> {
         self.lock.lock();
         MutexGuard { lock: self }
     }
@@ -163,22 +167,18 @@ impl<T: Default> Default for Mutex<T> {
     }
 }
 
-struct MutexGuard<'a, T> {
-    lock: &'a Mutex<T>,
-}
-
 impl<T> Deref for MutexGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        // SAFETY: We hold the lock
+        // SAFETY: We hold the lock.
         unsafe { &*self.lock.val.get() }
     }
 }
 
 impl<T> DerefMut for MutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: We hold the lock
+        // SAFETY: We hold the lock.
         unsafe { &mut *self.lock.val.get() }
     }
 }
