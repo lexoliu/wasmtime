@@ -64,11 +64,12 @@ use crate::runtime::vm::{
 use crate::{
     Enabled,
     runtime::vm::mpk::{self, ProtectionKey, ProtectionMask},
+    sync::Mutex,
     vm::HostAlignedByteCount,
 };
-use std::mem;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use alloc::sync::Arc;
+use core::mem;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use wasmtime_environ::{DefinedMemoryIndex, MemoryKind, MemoryTunables, Module, Tunables};
 
 /// A set of allocator slots.
@@ -253,7 +254,7 @@ impl MemoryPool {
             );
         }
 
-        let image_slots: Vec<_> = std::iter::repeat_with(|| Mutex::new(ImageSlot::Unmapped))
+        let image_slots: Vec<_> = core::iter::repeat_with(|| Mutex::new(ImageSlot::Unmapped))
             .take(constraints.num_slots)
             .collect();
 
