@@ -9,10 +9,11 @@
 //! immediately get flushed every time we push onto it.
 
 use super::PoolingInstanceAllocator;
+use crate::prelude::*;
 use crate::vm::sys::vm::{decommit_pages, iovec};
 use crate::vm::{MemoryAllocationIndex, MemoryImageSlot, Table, TableAllocationIndex};
+use core::fmt;
 use smallvec::SmallVec;
-use std::io;
 
 #[cfg(feature = "async")]
 use wasmtime_fiber::FiberStack;
@@ -23,7 +24,7 @@ struct IoVec(iovec);
 unsafe impl Send for IoVec {}
 unsafe impl Sync for IoVec {}
 
-impl std::fmt::Debug for IoVec {
+impl fmt::Debug for IoVec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("IoVec")
             .field("base", &self.0.iov_base)
@@ -55,8 +56,8 @@ pub struct DecommitQueue {
     // pub gc_heaps: SmallVec<[(GcHeapAllocationIndex, Box<dyn GcHeap>); 1]>,
 }
 
-impl std::fmt::Debug for DecommitQueue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for DecommitQueue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DecommitQueue")
             .field("raw", &self.raw)
             .finish_non_exhaustive()
@@ -147,7 +148,7 @@ impl DecommitQueue {
     }
 
     /// Returns if any decommit call failed.
-    fn decommit_all_raw(&mut self) -> io::Result<()> {
+    fn decommit_all_raw(&mut self) -> Result<()> {
         let iov: &[IoVec] = self.raw.as_slice();
         // SAFETY: `IoVec` is `repr(transparent)` over `iovec` so it should be
         // safe to reinterpret the slice as the same type.
