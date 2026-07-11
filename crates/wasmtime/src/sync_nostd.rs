@@ -15,7 +15,7 @@
 //! See a brief overview of this module in `sync_std.rs` as well.
 
 #![cfg_attr(
-    all(feature = "std", not(test)),
+    feature = "std",
     expect(dead_code, reason = "not used, but typechecked")
 )]
 
