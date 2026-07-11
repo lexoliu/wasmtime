@@ -1,4 +1,4 @@
-//! Implements thread wait and notify primitives with `std::sync` primitives.
+//! Implements thread wait and notify primitives.
 //!
 //! This is a simplified version of the `parking_lot_core` crate.
 //!
@@ -13,12 +13,21 @@
 
 use crate::prelude::*;
 use crate::runtime::vm::{SendSyncPtr, WaitResult};
-use std::collections::BTreeMap;
-use std::ptr::NonNull;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};
+use crate::sync::Mutex;
+use alloc::collections::BTreeMap;
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};
+#[cfg(not(feature = "std"))]
+use core::time::Duration;
+#[cfg(feature = "std")]
 use std::thread::{self, Thread};
+#[cfg(feature = "std")]
 use std::time::{Duration, Instant};
+
+#[cfg(feature = "std")]
+type WaitDeadline = Instant;
+#[cfg(not(feature = "std"))]
+type WaitDeadline = Duration;
 
 #[derive(Default, Debug)]
 struct Spot {
@@ -40,6 +49,7 @@ pub struct Waiter {
 struct WaiterInner {
     // NB: this field may be read concurrently, but is only written under the
     // lock of a `ParkingSpot`.
+    #[cfg(feature = "std")]
     thread: Thread,
 
     // NB: these fields are only modified/read under the lock of a
@@ -74,7 +84,7 @@ impl ParkingSpot {
         &self,
         atomic: &AtomicU32,
         expected: u32,
-        deadline: impl Into<Option<Instant>>,
+        deadline: impl Into<Option<WaitDeadline>>,
         waiter: &mut Waiter,
     ) -> WaitResult {
         self.wait(
@@ -90,7 +100,7 @@ impl ParkingSpot {
         &self,
         atomic: &AtomicU64,
         expected: u64,
-        deadline: impl Into<Option<Instant>>,
+        deadline: impl Into<Option<WaitDeadline>>,
         waiter: &mut Waiter,
     ) -> WaitResult {
         self.wait(
@@ -105,7 +115,7 @@ impl ParkingSpot {
         &self,
         key: u64,
         validate: impl FnOnce() -> bool,
-        deadline: Option<Instant>,
+        deadline: Option<WaitDeadline>,
         waiter: &mut Waiter,
     ) -> WaitResult {
         let mut inner = self
@@ -121,21 +131,16 @@ impl ParkingSpot {
 
         // Lazily initialize the `waiter` node if it hasn't been already, and
         // additionally ensure it's not accidentally in some other queue.
-        let waiter = waiter.inner.get_or_insert_with(|| {
-            Box::new(WaiterInner {
-                next: None,
-                prev: None,
-                notified: false,
-                thread: thread::current(),
-            })
-        });
+        let waiter = waiter
+            .inner
+            .get_or_insert_with(|| Box::new(WaiterInner::new()));
         assert!(waiter.next.is_none());
         assert!(waiter.prev.is_none());
 
         // Clear the `notified` flag if it was previously notified and
         // configure the thread to wakeup as our own.
         waiter.notified = false;
-        waiter.thread = thread::current();
+        waiter.prepare_wait();
 
         let ptr = SendSyncPtr::new(NonNull::from(&mut **waiter));
         let spot = inner.entry(key).or_insert_with(Spot::default);
@@ -154,21 +159,16 @@ impl ParkingSpot {
             // To handle spurious wakeups if the thread wakes up but a
             // notification wasn't received then the thread goes back to sleep.
             let timed_out = loop {
-                let timeout = match deadline {
-                    Some(deadline) => {
-                        let now = Instant::now();
-                        if deadline <= now {
-                            break true;
-                        } else {
-                            deadline - now
-                        }
-                    }
-                    None => Duration::MAX,
+                let Some(timeout) = timeout_before_deadline(deadline) else {
+                    break true;
                 };
 
                 drop(inner);
-                thread::park_timeout(timeout);
-                inner = self.inner.lock().unwrap();
+                park_current_thread(timeout);
+                inner = self
+                    .inner
+                    .lock()
+                    .expect("failed to lock inner parking table");
 
                 if ptr.as_ref().notified {
                     break false;
@@ -207,7 +207,7 @@ impl ParkingSpot {
                 let head = head.as_mut();
                 assert!(head.next.is_none());
                 head.notified = true;
-                head.thread.unpark();
+                head.unpark();
                 unparked += 1;
                 if unparked == n {
                     break;
@@ -306,6 +306,74 @@ impl Spot {
         }
         ret
     }
+}
+
+impl WaiterInner {
+    fn new() -> Self {
+        Self {
+            next: None,
+            prev: None,
+            notified: false,
+            #[cfg(feature = "std")]
+            thread: thread::current(),
+        }
+    }
+
+    fn prepare_wait(&mut self) {
+        #[cfg(feature = "std")]
+        {
+            self.thread = thread::current();
+        }
+    }
+
+    fn unpark(&self) {
+        #[cfg(feature = "std")]
+        {
+            self.thread.unpark();
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            unsafe {
+                wasmtime_parking_unpark();
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+fn timeout_before_deadline(deadline: Option<WaitDeadline>) -> Option<Duration> {
+    match deadline {
+        Some(deadline) => {
+            let now = Instant::now();
+            (deadline > now).then_some(deadline - now)
+        }
+        None => Some(Duration::MAX),
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn timeout_before_deadline(deadline: Option<WaitDeadline>) -> Option<Duration> {
+    Some(deadline.unwrap_or(Duration::MAX))
+}
+
+#[cfg(feature = "std")]
+fn park_current_thread(timeout: Duration) {
+    thread::park_timeout(timeout);
+}
+
+#[cfg(not(feature = "std"))]
+fn park_current_thread(timeout: Duration) {
+    let nanos = timeout.as_nanos();
+    let nanos = u64::try_from(nanos).unwrap_or(u64::MAX);
+    unsafe {
+        wasmtime_parking_wait(nanos);
+    }
+}
+
+#[cfg(not(feature = "std"))]
+unsafe extern "C" {
+    fn wasmtime_parking_wait(timeout_nanos: u64);
+    fn wasmtime_parking_unpark();
 }
 
 #[cfg(test)]
