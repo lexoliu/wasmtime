@@ -36,6 +36,37 @@ impl<T> Default for OnceLock<T> {
     }
 }
 
+/// Small wrapper around `std::sync::Mutex` which undoes poisoning.
+#[cfg(feature = "component-model-async")]
+#[derive(Debug)]
+pub struct Mutex<T>(std::sync::Mutex<T>);
+
+#[cfg(feature = "component-model-async")]
+pub type MutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
+
+#[cfg(feature = "component-model-async")]
+impl<T> Mutex<T> {
+    #[inline]
+    pub const fn new(val: T) -> Mutex<T> {
+        Mutex(std::sync::Mutex::new(val))
+    }
+
+    #[inline]
+    pub fn lock(&self) -> Result<MutexGuard<'_, T>, ()> {
+        match self.0.lock() {
+            Ok(guard) => Ok(guard),
+            Err(poisoned) => Ok(poisoned.into_inner()),
+        }
+    }
+}
+
+#[cfg(feature = "component-model-async")]
+impl<T: Default> Default for Mutex<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
 /// Small wrapper around `std::sync::RwLock` which undoes poisoning.
 #[derive(Debug, Default)]
 pub struct RwLock<T>(std::sync::RwLock<T>);
