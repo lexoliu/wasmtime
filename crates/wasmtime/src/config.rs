@@ -1263,7 +1263,10 @@ impl Config {
     ///
     /// [proposal]:
     ///     https://github.com/WebAssembly/component-model/blob/main/design/mvp/Concurrency.md
-    #[cfg(feature = "component-model-async")]
+    #[cfg(any(
+        feature = "component-model-async",
+        feature = "component-model-async-compile"
+    ))]
     pub fn wasm_component_model_async(&mut self, enable: bool) -> &mut Self {
         self.wasm_features(WasmFeatures::CM_ASYNC, enable);
         self
@@ -1276,7 +1279,10 @@ impl Config {
     ///
     /// [proposal]:
     ///     https://github.com/WebAssembly/component-model/blob/main/design/mvp/Concurrency.md
-    #[cfg(feature = "component-model-async")]
+    #[cfg(any(
+        feature = "component-model-async",
+        feature = "component-model-async-compile"
+    ))]
     pub fn wasm_component_model_more_async_builtins(&mut self, enable: bool) -> &mut Self {
         self.wasm_features(WasmFeatures::CM_MORE_ASYNC_BUILTINS, enable);
         self
@@ -1288,7 +1294,10 @@ impl Config {
     /// incomplete.
     ///
     /// [proposal]: https://github.com/WebAssembly/component-model/blob/main/design/mvp/Concurrency.md
-    #[cfg(feature = "component-model-async")]
+    #[cfg(any(
+        feature = "component-model-async",
+        feature = "component-model-async-compile"
+    ))]
     pub fn wasm_component_model_async_stackful(&mut self, enable: bool) -> &mut Self {
         self.wasm_features(WasmFeatures::CM_ASYNC_STACKFUL, enable);
         self
@@ -1301,7 +1310,10 @@ impl Config {
     ///
     /// [proposal]:
     ///     https://github.com/WebAssembly/component-model/pull/557
-    #[cfg(feature = "component-model-async")]
+    #[cfg(any(
+        feature = "component-model-async",
+        feature = "component-model-async-compile"
+    ))]
     pub fn wasm_component_model_threading(&mut self, enable: bool) -> &mut Self {
         self.wasm_features(WasmFeatures::CM_THREADING, enable);
         self
@@ -2746,7 +2758,12 @@ impl Config {
             | WasmFeatures::CM_ASYNC_STACKFUL
             | WasmFeatures::CM_THREADING
             | WasmFeatures::CM_ERROR_CONTEXT;
-        if tunables.concurrency_support && !cfg!(feature = "component-model-async") {
+        if tunables.concurrency_support
+            && !cfg!(any(
+                feature = "component-model-async",
+                feature = "component-model-async-compile"
+            ))
+        {
             bail!(
                 "concurrency support was requested but was not \
                  compiled into this build of Wasmtime"
