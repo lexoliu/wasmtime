@@ -42,6 +42,7 @@ use core::fmt;
 use core::ops::{Deref, DerefMut};
 use core::pin::pin;
 use core::ptr::NonNull;
+#[cfg(has_virtual_memory)]
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 use wasmtime_environ::error::OutOfMemory;
