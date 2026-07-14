@@ -2415,6 +2415,20 @@ impl Config {
                 }
 
                 use target_lexicon::*;
+
+                if matches!(
+                    self.compiler_target().architecture,
+                    Architecture::Riscv64(_)
+                ) && !self.compiler_config.as_ref().is_some_and(|config| {
+                    matches!(config.flags.get("has_v"), Some(UserSpecified::Yes))
+                }) {
+                    // The riscv64 backend lowers fixed-width SIMD through the V
+                    // extension. Without V it cannot compile any wasm SIMD or
+                    // relaxed-SIMD operations, so reject those proposals during
+                    // Config validation rather than reaching backend panics.
+                    unsupported |= WasmFeatures::SIMD | WasmFeatures::RELAXED_SIMD;
+                }
+
                 match self.compiler_target() {
                     Triple {
                         architecture: Architecture::X86_64 | Architecture::X86_64h,
@@ -5089,5 +5103,26 @@ impl Engine {
         }
 
         Vec::new().into_iter()
+    }
+}
+
+#[cfg(all(test, feature = "cranelift"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn riscv64_requires_v_for_simd_proposals() {
+        let mut config = Config::new();
+        config.target = Some("riscv64gc-unknown-none-elf".parse().unwrap());
+
+        let unsupported = config.compiler_panicking_wasm_features();
+        assert!(unsupported.contains(WasmFeatures::SIMD));
+        assert!(unsupported.contains(WasmFeatures::RELAXED_SIMD));
+
+        unsafe {
+            config.cranelift_flag_enable("has_v");
+        }
+        let unsupported = config.compiler_panicking_wasm_features();
+        assert!(!unsupported.intersects(WasmFeatures::SIMD | WasmFeatures::RELAXED_SIMD));
     }
 }
