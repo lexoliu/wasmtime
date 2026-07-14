@@ -6,6 +6,7 @@ use crate::runtime::vm::send_sync_ptr::SendSyncPtr;
 use crate::runtime::vm::{Mmap, mmap::UnalignedLength};
 #[cfg(not(has_virtual_memory))]
 use alloc::alloc::Layout;
+#[cfg(feature = "std")]
 use alloc::sync::Arc;
 use core::ops::{Deref, Range};
 use core::ptr::NonNull;
