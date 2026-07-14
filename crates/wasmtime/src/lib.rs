@@ -378,7 +378,11 @@
 // here to get warnings in all configurations of Wasmtime.
 #![cfg_attr(
     any(not(feature = "runtime"), not(feature = "std")),
-    expect(dead_code, unused_imports, reason = "list not burned down yet")
+    expect(dead_code, reason = "list not burned down yet")
+)]
+#![cfg_attr(
+    not(feature = "runtime"),
+    expect(unused_imports, reason = "list not burned down yet")
 )]
 // Allow broken links when the default features is disabled because most of our
 // documentation is written for the "one build" of the `main` branch which has
