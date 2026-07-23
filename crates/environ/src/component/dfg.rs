@@ -473,7 +473,9 @@ pub enum Trampoline {
     Trap,
     EnterSyncCall,
     ExitSyncCall,
-    ThreadIndex,
+    ThreadIndex {
+        instance: RuntimeComponentInstanceIndex,
+    },
     ThreadNewIndirect {
         instance: RuntimeComponentInstanceIndex,
         start_func_ty_idx: ComponentTypeIndex,
@@ -1160,7 +1162,9 @@ impl LinearizeDfg<'_> {
             Trampoline::Trap => info::Trampoline::Trap,
             Trampoline::EnterSyncCall => info::Trampoline::EnterSyncCall,
             Trampoline::ExitSyncCall => info::Trampoline::ExitSyncCall,
-            Trampoline::ThreadIndex => info::Trampoline::ThreadIndex,
+            Trampoline::ThreadIndex { instance } => info::Trampoline::ThreadIndex {
+                instance: *instance,
+            },
             Trampoline::ThreadNewIndirect {
                 instance,
                 start_func_ty_idx,

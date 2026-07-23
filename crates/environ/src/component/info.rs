@@ -1114,7 +1114,10 @@ pub enum Trampoline {
     ExitSyncCall,
 
     /// Intrinsic used to implement the `thread.index` component model builtin.
-    ThreadIndex,
+    ThreadIndex {
+        /// The specific component instance which is calling the intrinsic.
+        instance: RuntimeComponentInstanceIndex,
+    },
 
     /// Intrinsic used to implement the `thread.new-indirect` component model builtin.
     ThreadNewIndirect {
@@ -1252,7 +1255,7 @@ impl Trampoline {
             Trap => format!("trap"),
             EnterSyncCall => format!("enter-sync-call"),
             ExitSyncCall => format!("exit-sync-call"),
-            ThreadIndex => format!("thread-index"),
+            ThreadIndex { .. } => format!("thread-index"),
             ThreadNewIndirect { .. } => format!("thread-new-indirect"),
             ThreadResumeLater { .. } => format!("thread-resume-later"),
             ThreadSuspend { .. } => format!("thread-suspend"),
