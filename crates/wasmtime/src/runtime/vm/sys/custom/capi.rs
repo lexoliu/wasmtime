@@ -175,11 +175,13 @@ unsafe extern "C" {
     /// Wasmtime requires a small amount of TLS to be used at runtime,
     /// and this function returns the current value of the TLS state.
     ///
-    /// Wasmtime needs at least one pointer's worth of TLS space, and with the
+    /// Wasmtime needs at least one pointer's worth of TLS space, with the
     /// `component-model-async` feature a second pointer's worth of TLS space is
-    /// required. The `slot` variable is 0 for the default runtime TLS pointer,
-    /// and it is 1 for the component-model-async state. No other value of
-    /// `slot` is passed in.
+    /// required, and with the `async` feature a third. The `slot` variable is 0
+    /// for the default runtime TLS pointer, 1 for the component-model-async
+    /// state, and 2 for the fiber currently executing on this thread (see
+    /// `wasmtime::block_on_current_fiber`). No other value of `slot` is passed
+    /// in.
     ///
     /// The values should default to `NULL`.
     pub fn wasmtime_tls_get(slot: usize) -> *mut u8;
