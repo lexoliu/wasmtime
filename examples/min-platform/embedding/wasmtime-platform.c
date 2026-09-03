@@ -135,12 +135,13 @@ void wasmtime_memory_image_free(struct wasmtime_memory_image *image) {
 // Multi-threaded TLS using pthread
 #include <pthread.h>
 
-static pthread_key_t wasmtime_tls_keys[2];
+static pthread_key_t wasmtime_tls_keys[3];
 static pthread_once_t wasmtime_tls_key_once = PTHREAD_ONCE_INIT;
 
 static void make_tls_key(void) {
   pthread_key_create(&wasmtime_tls_keys[0], NULL);
   pthread_key_create(&wasmtime_tls_keys[1], NULL);
+  pthread_key_create(&wasmtime_tls_keys[2], NULL);
 }
 
 uint8_t *wasmtime_tls_get(size_t slot) {
@@ -156,7 +157,7 @@ void wasmtime_tls_set(size_t slot, uint8_t *val) {
 #else
 
 // Single-threaded TLS using a static variable
-static uint8_t *WASMTIME_TLS[2] = {NULL, NULL};
+static uint8_t *WASMTIME_TLS[3] = {NULL, NULL, NULL};
 
 uint8_t *wasmtime_tls_get(size_t slot) { return WASMTIME_TLS[slot]; }
 

@@ -188,6 +188,8 @@ pub struct Config {
     pub(crate) async_stack_size: usize,
     pub(crate) async_stack_zeroing: bool,
     #[cfg(feature = "async")]
+    pub(crate) block_on_current_fiber: bool,
+    #[cfg(feature = "async")]
     pub(crate) stack_creator: Option<Arc<dyn RuntimeFiberStackCreator>>,
     pub(crate) module_version: ModuleVersionStrategy,
     pub(crate) parallel_compilation: bool,
@@ -300,6 +302,8 @@ impl Config {
             disabled_features: WasmFeatures::empty(),
             async_stack_size: 2 << 20,
             async_stack_zeroing: false,
+            #[cfg(feature = "async")]
+            block_on_current_fiber: false,
             #[cfg(feature = "async")]
             stack_creator: None,
             module_version: ModuleVersionStrategy::default(),
@@ -886,6 +890,23 @@ impl Config {
     /// [`call_async`]: crate::TypedFunc::call_async
     pub fn async_stack_zeroing(&mut self, enable: bool) -> &mut Self {
         self.async_stack_zeroing = enable;
+        self
+    }
+
+    /// Allows embedder code running on a fiber's stack to block that
+    /// fiber through [`block_on_current_fiber`](crate::block_on_current_fiber).
+    ///
+    /// Without this, `block_on_current_fiber` always reports that no
+    /// fiber is running: publishing the running fiber costs a little
+    /// work on every resume, and on a custom platform it costs a third
+    /// TLS slot (`wasmtime_tls_get(2)`) that an embedder must be
+    /// prepared to serve. Neither is imposed on embedders that do not
+    /// use the hook.
+    ///
+    /// This option defaults to `false`.
+    #[cfg(feature = "async")]
+    pub fn block_on_current_fiber(&mut self, enable: bool) -> &mut Self {
+        self.block_on_current_fiber = enable;
         self
     }
 

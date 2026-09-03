@@ -10,6 +10,13 @@ fn async_store() -> Store<()> {
     Store::new(&Engine::default(), ())
 }
 
+/// A store on an engine that lets embedder code block the running fiber.
+fn blocking_fiber_store() -> Store<()> {
+    let mut config = Config::new();
+    config.block_on_current_fiber(true);
+    Store::new(&Engine::new(&config).unwrap(), ())
+}
+
 async fn run_smoke_test(store: &mut Store<()>, func: Func) {
     func.call_async(&mut *store, &[], &mut []).await.unwrap();
     func.call_async(&mut *store, &[], &mut []).await.unwrap();
@@ -1141,4 +1148,141 @@ async fn async_gc_with_func_new_and_func_wrap() -> Result<()> {
     b.call_async(&mut store, ()).await?;
 
     Ok(())
+}
+
+/// A future that is pending exactly once, so a fiber blocking on it has to
+/// suspend back to whoever is polling it before the value is available.
+struct PendingOnce {
+    polled: bool,
+    value: u32,
+}
+
+impl PendingOnce {
+    fn new(value: u32) -> Self {
+        Self {
+            polled: false,
+            value,
+        }
+    }
+}
+
+impl Future for PendingOnce {
+    type Output = u32;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<u32> {
+        if self.polled {
+            Poll::Ready(self.value)
+        } else {
+            self.polled = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+const CALL_HOST_MODULE: &str =
+    "(module (import \"\" \"\" (func $host)) (func (export \"run\") call $host))";
+
+/// A synchronous host function runs on the fiber's stack without holding the
+/// fiber's blocking context, which is the same position embedder code reaches
+/// when it is entered from that stack by some route other than a host call.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn block_on_current_fiber_from_sync_host_call() -> Result<()> {
+    let mut store = blocking_fiber_store();
+    let module = Module::new(store.engine(), CALL_HOST_MODULE)?;
+    let host = Func::wrap(&mut store, |_caller: Caller<'_, ()>| -> Result<()> {
+        // SAFETY: this runs on the stack of the fiber driving the wasm call
+        // below, with no live store borrow and nothing held that the poller of
+        // this fiber needs.
+        let value = unsafe { block_on_current_fiber(PendingOnce::new(42)) }?;
+        assert_eq!(value, 42);
+        Ok(())
+    });
+    let instance = Instance::new_async(&mut store, &module, &[host.into()]).await?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    run.call_async(&mut store, ()).await?;
+    Ok(())
+}
+
+/// The suspension really does hand control back to the poller: driving the
+/// call one poll at a time shows the fiber pending in between.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn block_on_current_fiber_suspends_to_the_poller() -> Result<()> {
+    let mut store = blocking_fiber_store();
+    let module = Module::new(store.engine(), CALL_HOST_MODULE)?;
+    let host = Func::wrap(&mut store, |_caller: Caller<'_, ()>| -> Result<()> {
+        // SAFETY: as above.
+        unsafe { block_on_current_fiber(PendingOnce::new(7)) }?;
+        Ok(())
+    });
+    let instance = Instance::new_async(&mut store, &module, &[host.into()]).await?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    let (result, yields) = CountPending::new(Box::pin(run.call_async(&mut store, ()))).await;
+    result?;
+    assert!(
+        yields > 0,
+        "blocking the fiber must return Poll::Pending at least once"
+    );
+    Ok(())
+}
+
+/// An `async` host function already holds the fiber's blocking context, so a
+/// nested request to block reports that rather than panicking.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn block_on_current_fiber_inside_async_host_call() -> Result<()> {
+    let mut store = blocking_fiber_store();
+    let module = Module::new(store.engine(), CALL_HOST_MODULE)?;
+    let host = Func::wrap_async(&mut store, |_caller: Caller<'_, ()>, _: ()| {
+        Box::new(async {
+            // SAFETY: on the fiber's stack, as above; the call is expected to
+            // decline rather than block.
+            let result = unsafe { block_on_current_fiber(PendingOnce::new(1)) };
+            assert!(
+                matches!(result, Err(BlockOnCurrentFiberError::Unavailable)),
+                "expected Unavailable, got {result:?}"
+            );
+            Ok(())
+        })
+    });
+    let instance = Instance::new_async(&mut store, &module, &[host.into()]).await?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    run.call_async(&mut store, ()).await?;
+    Ok(())
+}
+
+/// An engine that did not ask for the hook publishes no fiber, so the
+/// call declines and the embedder is never asked for the TLS slot it
+/// would need.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn block_on_current_fiber_is_off_unless_the_engine_asked_for_it() -> Result<()> {
+    let mut store = async_store();
+    let module = Module::new(store.engine(), CALL_HOST_MODULE)?;
+    let host = Func::wrap(&mut store, |_caller: Caller<'_, ()>| -> Result<()> {
+        // SAFETY: on the fiber's stack; the call is expected to decline.
+        let result = unsafe { block_on_current_fiber(PendingOnce::new(5)) };
+        assert!(
+            matches!(result, Err(BlockOnCurrentFiberError::NoFiber)),
+            "expected NoFiber, got {result:?}"
+        );
+        Ok(())
+    });
+    let instance = Instance::new_async(&mut store, &module, &[host.into()]).await?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    run.call_async(&mut store, ()).await?;
+    Ok(())
+}
+
+/// Off a fiber entirely there is nothing to suspend, and nothing is polled.
+#[test]
+fn block_on_current_fiber_outside_a_fiber() {
+    // SAFETY: the call is expected to decline; no fiber is running here.
+    let result = unsafe { block_on_current_fiber(PendingOnce::new(3)) };
+    assert!(
+        matches!(result, Err(BlockOnCurrentFiberError::NoFiber)),
+        "expected NoFiber, got {result:?}"
+    );
 }
