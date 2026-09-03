@@ -26,3 +26,18 @@ pub fn component_async_tls_get() -> *mut u8 {
 pub fn component_async_tls_set(ptr: *mut u8) {
     COMPONENT_ASYNC_TLS.with(|p| p.set(ptr));
 }
+
+#[cfg(feature = "async")]
+std::thread_local!(static CURRENT_FIBER_TLS: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) });
+
+#[inline]
+#[cfg(feature = "async")]
+pub fn current_fiber_tls_get() -> *mut u8 {
+    CURRENT_FIBER_TLS.with(|p| p.get())
+}
+
+#[inline]
+#[cfg(feature = "async")]
+pub fn current_fiber_tls_set(ptr: *mut u8) {
+    CURRENT_FIBER_TLS.with(|p| p.set(ptr));
+}

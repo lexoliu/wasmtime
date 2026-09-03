@@ -94,6 +94,9 @@ pub(crate) use interpreter_disabled as interpreter;
 #[cfg(feature = "component-model-async")]
 pub(crate) use sys::{component_async_tls_get, component_async_tls_set};
 
+#[cfg(feature = "async")]
+pub(crate) use sys::{current_fiber_tls_get, current_fiber_tls_set};
+
 #[cfg(feature = "debug-builtins")]
 pub use wasmtime_jit_debug::gdb_jit_int::GdbJitImageRegistration;
 

@@ -132,6 +132,172 @@ impl AsyncState {
     }
 }
 
+/// Description of the fiber currently executing on this thread, published by
+/// [`resume_fiber`] for exactly as long as that fiber is running.
+///
+/// The pointer to this record lives in embedder TLS slot 2 (see
+/// `wasmtime_tls_get`), alongside slot 0 (runtime activation state) and slot 1
+/// (component-model-async state).
+struct CurrentFiber {
+    /// The store the running fiber was resumed with.
+    ///
+    /// # Safety
+    ///
+    /// `resume_fiber` derives this from the `&mut StoreOpaque` it was handed
+    /// and then parks that borrow, untouched, until the fiber suspends or
+    /// completes. While this record is published the fiber therefore has
+    /// exclusive access to the store, exactly as a host call running on that
+    /// fiber does.
+    store: NonNull<StoreOpaque>,
+
+    /// Address range of the fiber's stack, used to reject a
+    /// [`block_on_current_fiber`] call made from a stack this record does not
+    /// describe.
+    stack: Range<usize>,
+}
+
+/// Publishes a [`CurrentFiber`] for the lifetime of the guard, restoring
+/// whatever was previously published (a fiber that resumed this one, or
+/// nothing) on drop.
+struct CurrentFiberGuard {
+    prev: *mut u8,
+}
+
+impl CurrentFiberGuard {
+    /// Publishes `current` for as long as the returned guard lives.
+    ///
+    /// Returns `None`, having touched no embedder TLS at all, when there is
+    /// nothing to publish. That is what keeps the third TLS slot off the
+    /// books for engines that never asked for
+    /// [`Config::block_on_current_fiber`](crate::Config::block_on_current_fiber):
+    /// a custom platform is only ever asked to serve a slot the embedder
+    /// opted into.
+    fn install(current: Option<&CurrentFiber>) -> Option<Self> {
+        let current = current?;
+        let prev = crate::runtime::vm::current_fiber_tls_get();
+        crate::runtime::vm::current_fiber_tls_set(ptr::from_ref(current).cast_mut().cast::<u8>());
+        Some(Self { prev })
+    }
+}
+
+impl Drop for CurrentFiberGuard {
+    fn drop(&mut self) {
+        crate::runtime::vm::current_fiber_tls_set(self.prev);
+    }
+}
+
+/// Reasons [`block_on_current_fiber`] could not block.
+#[derive(Debug)]
+pub enum BlockOnCurrentFiberError {
+    /// No wasm fiber is executing on this thread, or the caller is not running
+    /// on the stack of the fiber that is.
+    ///
+    /// Nothing was polled and the caller must resolve the work some other way.
+    NoFiber,
+
+    /// A fiber is executing on this thread but its blocking context is already
+    /// taken by a frame further up the same stack — an async host function or
+    /// another `block_on`, which holds the suspend pointer for the duration of
+    /// its call.
+    ///
+    /// Nothing was polled. Embedders that need to block from arbitrary points
+    /// on a fiber must keep those points out of such frames; see the
+    /// documentation on [`block_on_current_fiber`].
+    Unavailable,
+
+    /// The fiber was cancelled while it was blocked. It has been resumed only
+    /// so that it can unwind, and it must return to its caller as soon as
+    /// possible without running more guest code.
+    Cancelled(crate::Error),
+}
+
+impl core::fmt::Display for BlockOnCurrentFiberError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoFiber => f.write_str("no wasm fiber is executing on this thread"),
+            Self::Unavailable => {
+                f.write_str("the current fiber's blocking context is already in use")
+            }
+            Self::Cancelled(error) => write!(f, "the current fiber was cancelled: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for BlockOnCurrentFiberError {}
+
+/// Blocks the wasm fiber currently executing on this thread on `future`,
+/// returning its output once it resolves.
+///
+/// This is the same suspension an `async` host function performs, made
+/// available to embedder code that reaches the fiber's stack by some route
+/// other than a host call — a kernel page-fault trampoline that runs on the
+/// faulting fiber's stack, for instance. While the future is pending the fiber
+/// suspends back to whoever is polling it, so the embedder's executor keeps
+/// running; when the future resolves the fiber is resumed and this function
+/// returns in place, leaving the interrupted computation untouched.
+///
+/// Suspension uses [`StoreFiberYield::KeepStore`]: no other task may touch the
+/// store until this fiber resumes.
+///
+/// # Errors
+///
+/// Returns [`BlockOnCurrentFiberError::NoFiber`] if this engine did not enable
+/// [`Config::block_on_current_fiber`](crate::Config::block_on_current_fiber),
+/// if no fiber is running on this thread, or if the caller is on a different
+/// stack, and
+/// [`BlockOnCurrentFiberError::Unavailable`] if a frame further up this fiber's
+/// stack already holds the blocking context (an async host function, say). In
+/// both cases nothing has been polled. [`BlockOnCurrentFiberError::Cancelled`]
+/// means the fiber was cancelled while blocked and must unwind.
+///
+/// # Safety
+///
+/// The caller must be executing on the stack of the fiber it intends to block,
+/// and it must be sound for that fiber to suspend at this point: no borrow of
+/// the store may be live across the call, and no lock, interrupt-disabled
+/// region, or other resource that the code polling this fiber needs may be
+/// held. The `Send` bound on `future` mirrors
+/// [`BlockingContext::block_on`]: the future is held on the fiber's stack
+/// across the suspension, and the fiber may be polled again from another
+/// thread.
+pub unsafe fn block_on_current_fiber<F>(future: F) -> Result<F::Output, BlockOnCurrentFiberError>
+where
+    F: Future + Send,
+{
+    let Some(record) =
+        NonNull::new(crate::runtime::vm::current_fiber_tls_get().cast::<CurrentFiber>())
+    else {
+        return Err(BlockOnCurrentFiberError::NoFiber);
+    };
+
+    // SAFETY: `resume_fiber` publishes this record before switching to the
+    // fiber and unpublishes it before the record's storage dies, and the
+    // record is only reachable through this thread's TLS.
+    let record = unsafe { record.as_ref() };
+
+    // Guard against a record that belongs to some other stack: a fiber whose
+    // stack range is unavailable does not publish one, so an inner fiber can
+    // leave its resumer's record installed.
+    let probe = 0_usize;
+    let stack_pointer = ptr::from_ref(&probe) as usize;
+    if !record.stack.contains(&stack_pointer) {
+        return Err(BlockOnCurrentFiberError::NoFiber);
+    }
+
+    let mut store = record.store;
+    // SAFETY: see the `CurrentFiber::store` documentation — the resumer's
+    // borrow is parked for as long as this record is published, so the fiber
+    // holds exclusive access to the store here.
+    let store = unsafe { store.as_mut() };
+    if !store.fiber_async_state_mut().can_block() {
+        return Err(BlockOnCurrentFiberError::Unavailable);
+    }
+
+    store
+        .with_blocking(|_, cx| cx.block_on(future))
+        .map_err(BlockOnCurrentFiberError::Cancelled)
+}
+
 /// A helper structure used to block a fiber.
 ///
 /// This is acquired via either `StoreContextMut::with_blocking` or
@@ -741,6 +907,12 @@ fn resume_fiber<'a>(
                 Some(unsafe { self.state.take().unwrap().replace(self.store).into() });
         }
     }
+    // Snapshot the store pointer before `store` is moved into `Restore`
+    // below. `Restore` parks the borrow without touching it until the fiber
+    // suspends or completes, so for the duration of `resume` below the fiber
+    // itself — and only the fiber — has access to the store. That is the
+    // invariant `block_on_current_fiber` relies on.
+    let store_ptr = NonNull::from(&mut *store);
     let result = unsafe {
         let prev = fiber
             .state
@@ -753,6 +925,24 @@ fn resume_fiber<'a>(
             fiber,
             state: Some(prev),
         };
+        // Only an engine whose embedder asked for `block_on_current_fiber`
+        // publishes anything here: doing so costs a TLS slot the
+        // embedder has to serve, so it is not imposed by default.
+        let current = restore
+            .store
+            .engine()
+            .config()
+            .block_on_current_fiber
+            .then(|| restore.fiber.fiber().unwrap().stack().range())
+            .flatten()
+            .map(|stack| CurrentFiber {
+                store: store_ptr,
+                stack,
+            });
+        // Declared after `current` and before `restore`, so the record is
+        // unpublished while it is still alive and before the store's fiber
+        // state is restored.
+        let _guard = CurrentFiberGuard::install(current.as_ref());
         restore.fiber.fiber().unwrap().resume(result)
     };
 

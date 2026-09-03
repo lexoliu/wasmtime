@@ -117,6 +117,9 @@ mod profiling;
 pub use profiling::GuestProfiler;
 
 #[cfg(feature = "async")]
+pub use fiber::{BlockOnCurrentFiberError, block_on_current_fiber};
+
+#[cfg(feature = "async")]
 pub(crate) mod stack;
 #[cfg(feature = "async")]
 pub use stack::*;

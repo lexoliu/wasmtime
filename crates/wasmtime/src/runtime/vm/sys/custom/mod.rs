@@ -51,3 +51,15 @@ pub fn component_async_tls_get() -> *mut u8 {
 pub fn component_async_tls_set(ptr: *mut u8) {
     unsafe { capi::wasmtime_tls_set(1, ptr) }
 }
+
+#[inline]
+#[cfg(feature = "async")]
+pub fn current_fiber_tls_get() -> *mut u8 {
+    unsafe { capi::wasmtime_tls_get(2) }
+}
+
+#[inline]
+#[cfg(feature = "async")]
+pub fn current_fiber_tls_set(ptr: *mut u8) {
+    unsafe { capi::wasmtime_tls_set(2, ptr) }
+}
