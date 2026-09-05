@@ -12,7 +12,7 @@ use crate::prelude::*;
 use crate::runtime::vm::component::{ComponentInstance, TypedResource, TypedResourceIndex};
 use crate::runtime::vm::{self, VMFuncRef};
 use crate::store::{AsStoreOpaque, Asyncness, StoreOpaque};
-use crate::{AsContext, AsContextMut, Engine, Module, StoreContextMut};
+use crate::{AsContext, AsContextMut, Engine, Memory, Module, StoreContextMut};
 use alloc::sync::Arc;
 use core::marker;
 use core::pin::Pin;
@@ -343,6 +343,59 @@ impl Instance {
             id: data.component().id(),
             index,
         })
+    }
+
+    /// Returns the default linear memory of this component instance, if it
+    /// has one.
+    ///
+    /// A component does not export its core memories, so unlike
+    /// [`crate::Instance::get_memory`] this is not an export lookup. What it
+    /// returns is the memory the component instantiated for its own canonical
+    /// ABI — the one `canon lift` and `canon lower` in this component read and
+    /// write strings, lists and records through. That memory is the closest
+    /// analogue a component has to the `"memory"` export of a core module, and
+    /// it is what an embedder needs in order to reach the bytes a component is
+    /// working with.
+    ///
+    /// Returns `None` when this component instantiated no core memory at all,
+    /// which is the case for a component whose canonical options never need
+    /// one, and also when it instantiated more than one, because "the" memory
+    /// is then not a question with an answer. An embedder that has to reach a
+    /// particular memory of a multi-memory component needs an API that names
+    /// which one it means.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `store` does not own this instance.
+    pub fn get_default_memory(&self, mut store: impl AsContextMut) -> Option<Memory> {
+        self._get_default_memory(store.as_context_mut().0)
+    }
+
+    fn _get_default_memory(&self, store: &mut StoreOpaque) -> Option<Memory> {
+        let env_component = self.id().get(store).component().env_component();
+        if env_component.num_runtime_memories != 1 {
+            return None;
+        }
+        // The one runtime memory is whichever the component extracts during
+        // instantiation, and the initializer that extracted it still names
+        // where it came from. The export is cloned so the shared borrow of the
+        // store ends before the lookup, which needs the store mutably.
+        let export =
+            env_component
+                .initializers
+                .iter()
+                .find_map(|initializer| match initializer {
+                    GlobalInitializer::ExtractMemory(memory) => Some(memory.export.clone()),
+                    _ => None,
+                })?;
+        match lookup_vmexport(store, self.id.instance(), &export) {
+            vm::Export::Memory(memory) => Some(memory),
+            // A shared memory is reached through
+            // [`crate::Instance::get_shared_memory`] on the core instance that
+            // owns it. Handing one back as an unshared [`Memory`] would let a
+            // caller borrow bytes another thread may be writing.
+            _ => None,
+        }
     }
 
     fn lookup_export<'a>(
@@ -1206,5 +1259,103 @@ impl<T: 'static> InstancePre<T> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::component::{Component, Linker};
+    use crate::{Config, Engine, Store};
+
+    fn engine() -> Engine {
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        Engine::new(&config).unwrap()
+    }
+
+    fn instantiate(wat: &str) -> (Store<()>, super::Instance) {
+        let engine = engine();
+        let component = Component::new(&engine, wat).unwrap();
+        let mut store = Store::new(&engine, ());
+        let instance = Linker::new(&engine)
+            .instantiate(&mut store, &component)
+            .unwrap();
+        (store, instance)
+    }
+
+    /// A component's canonical ABI reads and writes through a core memory the
+    /// component never exports. The accessor has to reach *that* memory, and
+    /// the data segment is what proves it did: those bytes only exist in the
+    /// memory this module instantiated.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn default_memory_is_the_memory_the_canonical_abi_uses() {
+        let (mut store, instance) = instantiate(
+            r#"
+                (component
+                    (core module $m
+                        (memory (export "memory") 1)
+                        (data (i32.const 4) "\2a")
+                        (func (export "f") (result i32) i32.const 0)
+                    )
+                    (core instance $i (instantiate $m))
+                    (func (export "f") (result string)
+                        (canon lift (core func $i "f") (memory $i "memory")))
+                )
+            "#,
+        );
+
+        let memory = instance
+            .get_default_memory(&mut store)
+            .expect("a component with one canonical memory has a default memory");
+
+        assert_eq!(memory.data(&store).len(), 0x10000);
+        assert_eq!(memory.data(&store)[4], 0x2a);
+    }
+
+    /// A component whose canonical options never need memory has none to hand
+    /// back, and says so rather than inventing one.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_component_without_a_core_memory_has_no_default_memory() {
+        let (mut store, instance) = instantiate(
+            r#"
+                (component
+                    (core module $m
+                        (func (export "f") (param i32) (result i32) local.get 0)
+                    )
+                    (core instance $i (instantiate $m))
+                    (func (export "f") (param "x" u32) (result u32)
+                        (canon lift (core func $i "f")))
+                )
+            "#,
+        );
+
+        assert!(instance.get_default_memory(&mut store).is_none());
+    }
+
+    /// With two core memories in play "the" memory is not a question with an
+    /// answer, and guessing one would hand an embedder the wrong bytes.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_component_with_two_core_memories_has_no_default_memory() {
+        let (mut store, instance) = instantiate(
+            r#"
+                (component
+                    (core module $m
+                        (memory (export "memory") 1)
+                        (func (export "f") (result i32) i32.const 0)
+                    )
+                    (core instance $i1 (instantiate $m))
+                    (core instance $i2 (instantiate $m))
+                    (func (export "f1") (result string)
+                        (canon lift (core func $i1 "f") (memory $i1 "memory")))
+                    (func (export "f2") (result string)
+                        (canon lift (core func $i2 "f") (memory $i2 "memory")))
+                )
+            "#,
+        );
+
+        assert!(instance.get_default_memory(&mut store).is_none());
     }
 }
