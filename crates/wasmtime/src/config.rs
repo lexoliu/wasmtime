@@ -1715,8 +1715,12 @@ impl Config {
 
     /// Sets a custom stack creator.
     ///
-    /// Custom memory creators are used when creating creating async instance stacks for
-    /// the on-demand instance allocation strategy.
+    /// Custom stack creators are used when creating async instance stacks
+    /// for the on-demand instance allocation strategy, and for the pooling
+    /// strategy on targets whose stack pool does not own its stacks' memory
+    /// (every target without `mmap`). The pooling allocator's unix stack
+    /// pool carves stacks out of one mapping of its own and refuses a
+    /// creator when the engine is built, rather than ignoring it.
     #[cfg(feature = "async")]
     pub fn with_host_stack(&mut self, stack_creator: Arc<dyn StackCreator>) -> &mut Self {
         self.stack_creator = Some(Arc::new(StackCreatorProxy(stack_creator)));
@@ -2877,9 +2881,13 @@ impl Config {
                     config.stack_size = self.async_stack_size;
                     config.async_stack_zeroing = self.async_stack_zeroing;
                 }
-                let allocator = try_new::<Box<_>>(
+                let mut allocator = try_new::<Box<_>>(
                     crate::runtime::vm::PoolingInstanceAllocator::new(&config, tunables)?,
                 )?;
+                #[cfg(feature = "async")]
+                if let Some(stack_creator) = &self.stack_creator {
+                    allocator.set_stack_creator(stack_creator.clone())?;
+                }
                 Ok(allocator as _)
             }
         }

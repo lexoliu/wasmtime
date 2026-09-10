@@ -59,6 +59,7 @@ use crate::runtime::vm::{
 };
 use crate::sync::{Mutex, MutexGuard};
 use alloc::borrow::Cow;
+use alloc::sync::Arc;
 use core::fmt::{self, Display};
 use core::future::Future;
 use core::mem;
@@ -317,6 +318,20 @@ impl PoolingInstanceAllocator {
             },
             config: config.clone(),
         })
+    }
+
+    /// Route every fiber stack this allocator hands out through
+    /// `stack_creator`, as [`Config::with_host_stack`](crate::Config::with_host_stack)
+    /// asked. The stack pool keeps its concurrency limit; only where the
+    /// bytes come from changes. A stack pool that owns its stacks' memory
+    /// refuses the creator, so the error is the embedder's answer rather
+    /// than a silently ignored setting.
+    #[cfg(feature = "async")]
+    pub fn set_stack_creator(
+        &mut self,
+        stack_creator: Arc<dyn wasmtime_fiber::RuntimeFiberStackCreator>,
+    ) -> Result<()> {
+        self.stacks.set_stack_creator(stack_creator)
     }
 
     fn core_instance_size(&self) -> usize {
