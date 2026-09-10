@@ -4,6 +4,8 @@ use super::index_allocator::{SimpleIndexAllocator, SlotId};
 use crate::config::PoolingAllocationConfig;
 use crate::prelude::*;
 use crate::runtime::vm::{HostAlignedByteCount, Mmap, mmap::AlignedLength};
+use alloc::sync::Arc;
+use wasmtime_fiber::RuntimeFiberStackCreator;
 
 /// Represents a pool of execution stacks (used for the async fiber implementation).
 ///
@@ -85,6 +87,23 @@ impl StackPool {
             )?,
             index_allocator: SimpleIndexAllocator::new(config.limits.total_stacks)?,
         })
+    }
+
+    /// This pool carves every stack out of one mapping of its own and
+    /// tracks residency per slot, so it cannot hand out memory an embedder
+    /// created. A custom stack creator is honoured by the on-demand
+    /// allocator and by the pooling allocator's generic stack pool; asking
+    /// this one is refused rather than ignored.
+    pub fn set_stack_creator(
+        &mut self,
+        stack_creator: Arc<dyn RuntimeFiberStackCreator>,
+    ) -> Result<()> {
+        let _ = stack_creator;
+        bail!(
+            "the pooling allocator's unix stack pool allocates its own mapping and \
+             cannot honour `Config::with_host_stack`; use the on-demand allocator or \
+             a target without `mmap`"
+        )
     }
 
     /// Are there zero slots in use right now?
@@ -270,6 +289,38 @@ impl StackPool {
 mod tests {
     use super::*;
     use crate::config::InstanceLimits;
+
+    #[test]
+    fn the_unix_pool_refuses_a_stack_creator() -> Result<()> {
+        struct Never;
+        unsafe impl RuntimeFiberStackCreator for Never {
+            fn new_stack(
+                &self,
+                _size: usize,
+                _zeroed: bool,
+            ) -> Result<Box<dyn wasmtime_fiber::RuntimeFiberStack>> {
+                unreachable!("the unix pool never asks a creator for a stack")
+            }
+        }
+
+        let config = PoolingAllocationConfig {
+            limits: InstanceLimits {
+                total_stacks: 1,
+                ..Default::default()
+            },
+            stack_size: 1,
+            ..PoolingAllocationConfig::default()
+        };
+        let mut pool = StackPool::new(&config)?;
+        let error = pool
+            .set_stack_creator(Arc::new(Never))
+            .expect_err("the unix pool owns its mapping");
+        assert!(
+            format!("{error}").contains("with_host_stack"),
+            "the refusal names the setting: {error}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_stack_pool() -> Result<()> {
