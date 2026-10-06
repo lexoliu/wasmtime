@@ -199,8 +199,15 @@ impl Engine {
                 // If we collect into Result<Vec<B>, E> directly, the returned error is not
                 // deterministic, because any error could be returned early. So we first materialize
                 // all results in order and then return the first error deterministically, or Ok(_).
+                //
+                // `with_max_len(1)` makes every input its own stealable job.
+                // An indexed parallel iterator otherwise splits the input into
+                // a few leaves up front and never re-splits a leaf unless it
+                // is stolen, so one leaf holding a heavy function keeps its
+                // worker busy long after the others have run dry.
                 return input
                     .into_par_iter()
+                    .with_max_len(1)
                     .map(|a| f(a))
                     .collect::<Vec<Result<B, E>>>()
                     .into_iter()
