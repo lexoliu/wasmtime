@@ -1397,9 +1397,12 @@ pub(crate) trait MacroAssembler {
     type ABI: abi::ABI;
 
     /// Emit the function prologue.
-    fn prologue(&mut self, vmctx: Reg) -> Result<()> {
+    ///
+    /// `stack_limit_offset` is the offset within `VMStoreContext` of the
+    /// stack limit the trapping prologue check compares against.
+    fn prologue(&mut self, vmctx: Reg, stack_limit_offset: u8) -> Result<()> {
         self.frame_setup()?;
-        self.check_stack(vmctx)
+        self.check_stack(vmctx, stack_limit_offset)
     }
 
     /// Generate the frame setup sequence.
@@ -1408,8 +1411,12 @@ pub(crate) trait MacroAssembler {
     /// Generate the frame restore sequence.
     fn frame_restore(&mut self) -> Result<()>;
 
-    /// Emit a stack check.
-    fn check_stack(&mut self, vmctx: Reg) -> Result<()>;
+    /// Emit a stack check against the limit at `stack_limit_offset` within
+    /// `VMStoreContext`.
+    fn check_stack(&mut self, vmctx: Reg, stack_limit_offset: u8) -> Result<()>;
+
+    /// Copy the stack pointer Winch's own stack operations use into `dst`.
+    fn stack_pointer(&mut self, dst: WritableReg) -> Result<()>;
 
     /// Emit the function epilogue.
     fn epilogue(&mut self) -> Result<()> {

@@ -346,7 +346,8 @@ impl StoreOpaque {
                 .context(GcHeapGrowthFailed)?
                 .ok_or(GcHeapGrowthFailed)?;
         }
-        *heap.store.vm_store_context.gc_heap.get_mut() = heap.memory.vmmemory();
+        // SAFETY: `gc_heap` is only accessed by the thread running this store.
+        unsafe { *heap.store.vm_store_context.gc_heap.get() = heap.memory.vmmemory() };
 
         let new_size_in_bytes = u64::try_from(heap.memory.byte_size())?;
         assert!(new_size_in_bytes > current_size_in_bytes);
@@ -909,11 +910,10 @@ impl StoreOpaque {
         log::trace!("allocating GC heap for store {:?}", self.id());
 
         assert!(self.gc_store.is_none());
-        assert_eq!(
-            self.vm_store_context.gc_heap.get_mut().base.as_non_null(),
-            NonNull::dangling(),
-        );
-        assert_eq!(self.vm_store_context.gc_heap.get_mut().current_length(), 0);
+        // SAFETY: `gc_heap` is only accessed by the thread running this store.
+        let gc_heap = unsafe { &*self.vm_store_context.gc_heap.get() };
+        assert_eq!(gc_heap.base.as_non_null(), NonNull::dangling());
+        assert_eq!(gc_heap.current_length(), 0);
 
         let engine = self.engine();
         let mem_ty = engine.tunables().gc_heap_memory_type();
@@ -962,7 +962,8 @@ impl StoreOpaque {
         heap.attach(mem);
 
         let gc_store = GcStore::new(index, heap, engine.tunables().gc_zeal_alloc_counter);
-        *self.vm_store_context.gc_heap.get_mut() = gc_store.vmmemory_definition();
+        // SAFETY: `gc_heap` is only accessed by the thread running this store.
+        unsafe { *self.vm_store_context.gc_heap.get() = gc_store.vmmemory_definition() };
         Ok(self.gc_store.insert(gc_store))
     }
 

@@ -858,8 +858,8 @@ impl CallThreadState {
                 // If doesn't yet already have a backtrace, and one's not been
                 // captured yet, then assign one now.
                 if !has_backtrace {
-                    trap.backtrace = self.capture_backtrace(store.vm_store_context_mut(), None);
-                    trap.coredumpstack = self.capture_coredump(store.vm_store_context_mut(), None);
+                    trap.backtrace = self.capture_backtrace(store.vm_store_context(), None);
+                    trap.coredumpstack = self.capture_coredump(store.vm_store_context(), None);
                 }
             }
 

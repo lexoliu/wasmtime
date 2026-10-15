@@ -290,6 +290,11 @@ pub trait PtrSize {
         self.vmstore_context_component_context_slot(0) + (NUM_COMPONENT_CONTEXT_SLOTS as u8) * 4
     }
 
+    /// Return the offset of the `real_stack_limit` field of `VMStoreContext`.
+    fn vmstore_context_real_stack_limit(&self) -> u8 {
+        self.vmstore_context_current_thread() + self.size()
+    }
+
     // Offsets within `VMDeferredThread`
 
     /// Offset of `VMDeferredThread::parent`.

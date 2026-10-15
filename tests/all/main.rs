@@ -50,6 +50,7 @@ mod profiling;
 mod pulley;
 mod relocs;
 mod stack_creator;
+mod stack_limit_interruption;
 mod stack_overflow;
 mod store;
 mod structs;

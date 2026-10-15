@@ -771,6 +771,42 @@ impl Config {
         self
     }
 
+    /// Enables resumable interruption through the store's stack limit.
+    ///
+    /// With this enabled, compiled code compares the stack pointer with the
+    /// store's stack limit at every function entry, at every loop header and
+    /// between the chunks of a bulk memory operation. A failed compare does
+    /// not trap: it calls into the runtime, which either delivers a pending
+    /// interruption or raises the ordinary stack-overflow trap when the stack
+    /// really is exhausted.
+    ///
+    /// An interruption is requested from any thread, or from an interrupt
+    /// handler, through a [`StoreInterruptHandle`](crate::StoreInterruptHandle)
+    /// obtained with [`Store::interrupt_handle`](crate::Store::interrupt_handle).
+    /// The request raises the stack limit to a sentinel no stack pointer can
+    /// satisfy, so the next check in the guest fails and runs the store's
+    /// [`Store::interrupt_callback`](crate::Store::interrupt_callback). A
+    /// request made while the store runs host code, or while its guest is
+    /// suspended on another fiber, stays pending and is delivered at the
+    /// guest's next check.
+    ///
+    /// Unlike [`Config::epoch_interruption`], the common path loads one word
+    /// and compares it with the stack pointer, keeping no value live across
+    /// the function body, and the engine has no shared counter: each store
+    /// is interrupted individually.
+    ///
+    /// This option cannot be combined with [`Config::epoch_interruption`],
+    /// with the stack-switching proposal (whose instructions rewrite the
+    /// stack limit from compiled code), or with Pulley targets (which have no
+    /// native stack-pointer check). [`Engine::new`](crate::Engine::new)
+    /// refuses those combinations.
+    ///
+    /// This option is disabled by default.
+    pub fn stack_limit_interruption(&mut self, enable: bool) -> &mut Self {
+        self.tunables.stack_limit_interruption = Some(enable);
+        self
+    }
+
     /// XXX: For internal fuzzing and debugging use only!
     #[doc(hidden)]
     pub fn gc_zeal_alloc_counter(&mut self, counter: Option<NonZeroU32>) -> Result<&mut Self> {
@@ -2847,6 +2883,28 @@ impl Config {
 
         if tunables.debug_native && !tunables.debug_symbols {
             bail!("cannot enable native debug info while debug symbols are disabled");
+        }
+
+        if tunables.stack_limit_interruption {
+            // Two preemption mechanisms in one engine would emit two checks at
+            // every function entry and loop header for the same purpose.
+            if tunables.epoch_interruption {
+                bail!("`stack_limit_interruption` and `epoch_interruption` cannot both be enabled");
+            }
+            // `stack_switch`/`resume` save and restore `VMStoreContext::stack_limit`
+            // from compiled code, which would capture or discard the interrupt
+            // sentinel without consulting the pending flag.
+            if features.contains(WasmFeatures::STACK_SWITCHING) {
+                bail!(
+                    "`stack_limit_interruption` cannot be enabled together with the \
+                     `wasm_stack_switching` feature"
+                );
+            }
+            // Pulley does not compare the native stack pointer with the store's
+            // stack limit at all, so a raised limit would never be observed.
+            if self.compiler_target().is_pulley() {
+                bail!("`stack_limit_interruption` is not supported on Pulley targets");
+            }
         }
 
         Ok((tunables, features))

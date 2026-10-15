@@ -1609,11 +1609,7 @@ impl StoreOpaque {
 
         // If the JIT-visible current thread isn't a deferred thread then
         // `ConcurrentState` is already up to date.
-        if !self
-            .vm_store_context_mut()
-            .current_thread_mut()
-            .is_deferred()
-        {
+        if !self.vm_store_context().current_thread().is_deferred() {
             return Ok(self
                 .concurrent_state_mut_already_forced_current_thread()
                 .unforced_current_thread);
@@ -1636,7 +1632,7 @@ impl StoreOpaque {
         // Collect the deferred frames pushed inline by fused adapters, walking
         // the `parent` chain from innermost to the base.
         let mut frames = Vec::new();
-        let mut cur = *self.vm_store_context_mut().current_thread_mut();
+        let mut cur = self.vm_store_context().current_thread();
         while let Some(ptr) = cur.as_deferred() {
             // SAFETY: `ptr` points at a `VMDeferredThread` living in a fused
             // adapter's stack frame that is suspended below us on the stack
@@ -1654,11 +1650,12 @@ impl StoreOpaque {
         // Mark the current thread forced *before* replaying so that any
         // reentrant `force_current_thread` call short-circuits via the
         // non-deferred path above.
-        *self.vm_store_context_mut().current_thread_mut() = VMLazyThread::forced();
+        self.vm_store_context()
+            .set_current_thread(VMLazyThread::forced());
 
         // Save the current context, as we need to overwrite it while replaying
         // below.
-        let current_context = *self.vm_store_context_mut().component_context_mut();
+        let current_context = self.vm_store_context().component_context();
 
         // Replay the deferred `enter_guest_sync_call`s outermost-first so that
         // the resulting `ConcurrentState` matches what the non-deferred path
@@ -1667,7 +1664,7 @@ impl StoreOpaque {
             // Restore the caller's context slots so that we save the correct
             // values into the caller's thread, exactly as the non-deferred path
             // would have on entry.
-            *self.vm_store_context_mut().component_context_mut() = saved_context;
+            self.vm_store_context().set_component_context(saved_context);
             let callee = RuntimeInstance {
                 instance: id,
                 index: RuntimeComponentInstanceIndex::from_u32(callee_instance),
@@ -1676,7 +1673,8 @@ impl StoreOpaque {
         }
 
         // Replaying done; restore the current context.
-        *self.vm_store_context_mut().component_context_mut() = current_context;
+        self.vm_store_context()
+            .set_component_context(current_context);
 
         Ok(self
             .concurrent_state_mut_without_forcing_current_thread()
@@ -1918,14 +1916,14 @@ impl StoreOpaque {
         // this also leaves behind sentinel values to try to uncover bugs where
         // this may be forgotten.
         if let Some(old_thread) = old_thread.guest() {
-            let old_context = *self.vm_store_context_mut().component_context_mut();
+            let old_context = self.vm_store_context().component_context();
             self.concurrent_state_mut()?
                 .get_mut(old_thread.thread)?
                 .context = old_context;
         }
         if cfg!(debug_assertions) {
-            *self.vm_store_context_mut().component_context_mut() =
-                [u32::MAX; NUM_COMPONENT_CONTEXT_SLOTS];
+            self.vm_store_context()
+                .set_component_context([u32::MAX; NUM_COMPONENT_CONTEXT_SLOTS]);
         }
         if let Some(thread) = thread.guest() {
             let thread = self.concurrent_state_mut()?.get_mut(thread.thread)?;
@@ -1933,7 +1931,7 @@ impl StoreOpaque {
             if cfg!(debug_assertions) {
                 thread.context = [u32::MAX; NUM_COMPONENT_CONTEXT_SLOTS];
             }
-            *self.vm_store_context_mut().component_context_mut() = context;
+            self.vm_store_context().set_component_context(context);
         }
 
         // Each time we switch threads, we conservatively set `task_may_block`
@@ -1955,11 +1953,12 @@ impl StoreOpaque {
         }
 
         // Keep the JIT-visible current-thread pointer in sync.
-        *self.vm_store_context_mut().current_thread_mut() = if thread.is_none() {
-            VMLazyThread::none()
-        } else {
-            VMLazyThread::forced()
-        };
+        self.vm_store_context()
+            .set_current_thread(if thread.is_none() {
+                VMLazyThread::none()
+            } else {
+                VMLazyThread::forced()
+            });
 
         Ok(old_thread)
     }

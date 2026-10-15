@@ -807,17 +807,21 @@ impl FiberResumeState {
 impl StoreOpaque {
     /// Helper function to swap the `stack_limit` field in the `VMStoreContext`
     /// within this store.
+    ///
+    /// This goes through `VMStoreContext::replace_stack_limit`, so a pending
+    /// stack-limit interruption survives the switch and is delivered on
+    /// whichever stack next runs this store's wasm.
     fn replace_stack_limit(&mut self, stack_limit: usize) -> usize {
-        mem::replace(
-            &mut self.vm_store_context_mut().stack_limit.get_mut(),
-            stack_limit,
-        )
+        self.vm_store_context().replace_stack_limit(stack_limit)
     }
 
     /// Helper function to swap the `async_guard_range` field in the `VMStoreContext`
     /// within this store.
     fn replace_async_guard_range(&mut self, range: Range<*mut u8>) -> Range<*mut u8> {
-        mem::replace(&mut self.vm_store_context_mut().async_guard_range, range)
+        // SAFETY: `async_guard_range` is written only by the thread running
+        // this store, which `&mut self` proves is us; the signal handler that
+        // reads it runs on (or on behalf of) this same thread.
+        unsafe { mem::replace(&mut *self.vm_store_context().async_guard_range.get(), range) }
     }
 
     fn replace_current_suspend(

@@ -223,6 +223,10 @@ pub unsafe trait VMStore: 'static {
     #[cfg(target_has_atomic = "64")]
     fn new_epoch_updated_deadline(&mut self) -> Result<crate::UpdateDeadline>;
 
+    /// Callback invoked by the `stack_limit_interrupt` builtin when it took a
+    /// pending stack-limit interruption. Runs the store's interrupt callback.
+    fn stack_limit_interrupted(&mut self) -> Result<crate::InterruptAction>;
+
     #[cfg(feature = "component-model-async")]
     fn component_async_store(
         &mut self,

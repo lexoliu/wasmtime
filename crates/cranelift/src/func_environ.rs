@@ -749,6 +749,57 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         builder.ins().call(check_free, &[vmctx, ptr]);
     }
 
+    /// Emits the resumable stack-limit check used by stack-limit
+    /// interruption at loop headers and between bulk-memory chunks.
+    ///
+    /// Nothing is cached across the body: the store-context pointer load is
+    /// read-only and may be hoisted, but the limit itself is reloaded at
+    /// every check. Its alias region is never stored to by compiled code, yet
+    /// the reload is not redundant-load-eliminated against an earlier check
+    /// because every check's cold path calls the builtin, and a call is a
+    /// memory fence to alias analysis: the merge after each check (and the
+    /// loop-header merge of the back edge) starts a new memory version.
+    fn stack_limit_interrupt_check(&mut self, builder: &mut FunctionBuilder<'_>) {
+        let vmstore_ctx = self.get_vmstore_context_ptr(builder);
+        let limit = self
+            .alias_regions
+            .vmstore_context_stack_limit(&mut builder.cursor(), vmstore_ctx);
+        let sp = builder.ins().get_stack_pointer(self.pointer_type());
+        self.stack_limit_interrupt_branch(builder, sp, limit);
+    }
+
+    /// Branches to a cold block calling `stack_limit_interrupt(vmctx, sp)`
+    /// when `sp < limit`, then continues in a fresh block either way.
+    ///
+    /// The builtin delivers a pending interruption (which may yield or end
+    /// execution with an error) and raises the stack-overflow trap if `sp` is
+    /// below the store's real limit; otherwise it returns and the function
+    /// resumes. Being a call, it is a safepoint like `new_epoch`.
+    fn stack_limit_interrupt_branch(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        sp: ir::Value,
+        limit: ir::Value,
+    ) {
+        let failed = builder.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
+        let interrupt_block = builder.create_block();
+        builder.set_cold_block(interrupt_block);
+        let continuation_block = builder.create_block();
+        builder
+            .ins()
+            .brif(failed, interrupt_block, &[], continuation_block, &[]);
+        builder.seal_block(interrupt_block);
+
+        builder.switch_to_block(interrupt_block);
+        let stack_limit_interrupt = self.builtin_functions.stack_limit_interrupt(builder.func);
+        let vmctx = self.vmctx_val(&mut builder.cursor());
+        builder.ins().call(stack_limit_interrupt, &[vmctx, sp]);
+        builder.ins().jump(continuation_block, &[]);
+        builder.seal_block(continuation_block);
+
+        builder.switch_to_block(continuation_block);
+    }
+
     fn epoch_ptr(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::Value {
         let vmctx = self.vmctx_val(&mut builder.cursor());
         self.alias_regions
@@ -3615,6 +3666,9 @@ impl FuncEnvironment<'_> {
                 if env.tunables.epoch_interruption {
                     env.epoch_check(builder);
                 }
+                if env.tunables.stack_limit_interruption {
+                    env.stack_limit_interrupt_check(builder);
+                }
                 match *op {
                     BulkOp::MemoryCopy { dst, src, len, .. } => {
                         if env.tunables.consume_fuel {
@@ -3646,7 +3700,10 @@ impl FuncEnvironment<'_> {
 
         // If epochs and fuel are disabled, then just call the libcall and
         // return. No need for the loops below.
-        if !self.tunables.epoch_interruption && !self.tunables.consume_fuel {
+        if !self.tunables.epoch_interruption
+            && !self.tunables.stack_limit_interruption
+            && !self.tunables.consume_fuel
+        {
             raw_call(self, builder, &op);
             return;
         }
@@ -5160,6 +5217,12 @@ impl FuncEnvironment<'_> {
             self.epoch_check(builder);
         }
 
+        // With stack-limit interruption, compare the stack pointer against
+        // the store's published limit, which a pending interruption raises.
+        if self.tunables.stack_limit_interruption {
+            self.stack_limit_interrupt_check(builder);
+        }
+
         Ok(())
     }
 
@@ -5212,8 +5275,16 @@ impl FuncEnvironment<'_> {
             let vmctx = self.vmctx_val(&mut builder.cursor());
             let limit = limit.emit(&mut builder.cursor(), vmctx);
             let sp = builder.ins().get_stack_pointer(self.pointer_type());
-            let overflow = builder.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
-            self.conditionally_trap(builder, overflow, ir::TrapCode::STACK_OVERFLOW);
+            if self.tunables.stack_limit_interruption {
+                // Function entries need a check of their own, not just loop
+                // headers: a tree of calls with no loops (f0 calls f1 ten
+                // times, f1 calls f2 ten times, ...) runs for time
+                // exponential in its size without reaching a back edge.
+                self.stack_limit_interrupt_branch(builder, sp, limit);
+            } else {
+                let overflow = builder.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
+                self.conditionally_trap(builder, overflow, ir::TrapCode::STACK_OVERFLOW);
+            }
         }
 
         self.update_state_slot_vmctx(builder);

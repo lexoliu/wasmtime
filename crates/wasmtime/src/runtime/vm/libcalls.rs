@@ -740,6 +740,53 @@ fn new_epoch(store: &mut dyn VMStore, _instance: InstanceId) -> Result<NextEpoch
     })?
 }
 
+// Hook for when compiled code's stack-limit check fails under stack-limit
+// interruption: either an interruption was requested (the limit holds the
+// sentinel) or the stack really is exhausted, or both.
+fn stack_limit_interrupt(
+    store: &mut dyn VMStore,
+    _instance: InstanceId,
+    sp: *mut u8,
+) -> Result<()> {
+    use crate::InterruptAction;
+
+    // Clear the pending flag and re-arm the real limit before running the
+    // callback, so a request made while the callback runs (or while the
+    // guest is suspended in a yield) is delivered at the next check rather
+    // than cleared with this one.
+    if store.vm_store_context().take_interrupt() {
+        let action = store.stack_limit_interrupted()?;
+        block_on!(store, async move |store, asyncness| {
+            #[cfg(not(feature = "async"))]
+            let _ = (&store, asyncness);
+
+            match action {
+                InterruptAction::Continue => {}
+                #[cfg(feature = "async")]
+                InterruptAction::Yield => {
+                    if asyncness != Asyncness::Yes {
+                        bail!(
+                            "cannot use `InterruptAction::Yield` without using \
+                             an async wasm entrypoint",
+                        );
+                    }
+                    store.yield_now().await;
+                }
+            }
+            Ok(())
+        })??;
+    }
+
+    // Whether or not an interruption was handled, a stack pointer below the
+    // real limit is a genuine overflow and traps exactly as the ordinary
+    // check would. The limit is read after the callback, since a yield may
+    // have resumed this guest with its own fiber's limit restored.
+    if sp.addr() < store.vm_store_context().real_stack_limit() {
+        return Err(Trap::StackOverflow.into());
+    }
+    Ok(())
+}
+
 struct NextEpoch(u64);
 
 unsafe impl HostResultHasUnwindSentinel for NextEpoch {

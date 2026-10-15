@@ -36,6 +36,10 @@ macro_rules! foreach_builtin_function {
             // Invoked when we reach a new epoch.
             #[cfg(target_has_atomic = "64")]
             new_epoch(vmctx: vmctx) -> u64;
+            // Invoked when a stack-limit check fails under stack-limit
+            // interruption: delivers a pending interruption, then traps if
+            // `sp` is really below the store's stack limit.
+            stack_limit_interrupt(vmctx: vmctx, sp: pointer) -> bool;
             // Invoked before malloc returns.
             #[cfg(feature = "wmemcheck")]
             check_malloc(vmctx: vmctx, addr: u32, len: u32) -> bool;

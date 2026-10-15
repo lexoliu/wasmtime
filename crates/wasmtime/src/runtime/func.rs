@@ -16,7 +16,7 @@ use core::convert::Infallible;
 use core::ffi::c_void;
 #[cfg(feature = "async")]
 use core::future::Future;
-use core::mem::{self, MaybeUninit};
+use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use wasmtime_environ::{PanicOnOom as _, VMSharedTypeIndex};
 
@@ -1530,9 +1530,11 @@ impl EntryStoreContext {
         // For asynchronous stores then each call happens on a separate native
         // stack. This means that the previous stack limit is no longer relevant
         // because we're on a separate stack.
-        if unsafe { *store.0.vm_store_context().stack_limit.get() } != usize::MAX
-            && !store.0.can_block()
-        {
+        //
+        // The real limit is consulted rather than the word compiled code reads,
+        // which holds `VMStoreContext::INTERRUPT_SENTINEL` (also `usize::MAX`)
+        // while a stack-limit interruption is pending.
+        if store.0.vm_store_context().real_stack_limit() != usize::MAX && !store.0.can_block() {
             stack_limit = None;
         }
         // Ignore this stack pointer business on miri since we can't execute wasm
@@ -1575,12 +1577,10 @@ impl EntryStoreContext {
             // golly it'll get nigh-infinite stack in which case the limit is 0.
             let wasm_stack_limit =
                 stack_pointer.saturating_sub(store.engine().config().max_wasm_stack);
-            let prev_stack = unsafe {
-                mem::replace(
-                    &mut *store.0.vm_store_context().stack_limit.get(),
-                    wasm_stack_limit,
-                )
-            };
+            let prev_stack = store
+                .0
+                .vm_store_context()
+                .replace_stack_limit(wasm_stack_limit);
             stack_limit = Some(prev_stack);
         }
 
@@ -1614,7 +1614,7 @@ impl EntryStoreContext {
     fn exit_wasm(&mut self) {
         unsafe {
             if let Some(limit) = self.stack_limit {
-                *(&*self.vm_store_context).stack_limit.get() = limit;
+                (*self.vm_store_context).replace_stack_limit(limit);
             }
 
             *(*self.vm_store_context).last_wasm_exit_trampoline_fp.get() =

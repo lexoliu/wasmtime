@@ -166,7 +166,7 @@ impl Masm for MacroAssembler {
         Ok(())
     }
 
-    fn check_stack(&mut self, vmctx: Reg) -> Result<()> {
+    fn check_stack(&mut self, vmctx: Reg, stack_limit_offset: u8) -> Result<()> {
         let ptr_size_u8: u8 = self.ptr_size.bytes().try_into().unwrap();
 
         // The PatchableAddToReg construct on aarch64 is not a single
@@ -193,10 +193,7 @@ impl Masm for MacroAssembler {
                     )?;
 
                     masm.load_ptr(
-                        Address::offset(
-                            scratch_stk_limit.inner(),
-                            ptr_size_u8.vmstore_context_stack_limit().into(),
-                        ),
+                        Address::offset(scratch_stk_limit.inner(), stack_limit_offset.into()),
                         scratch_stk_limit.writable(),
                     )?;
 
@@ -212,6 +209,13 @@ impl Masm for MacroAssembler {
                 })
             })
         })
+    }
+
+    fn stack_pointer(&mut self, dst: WritableReg) -> Result<()> {
+        // Winch addresses its frame through the shadow stack pointer; the real
+        // `sp` only follows it, aligned, around calls.
+        self.asm.mov_rr(regs::shadow_sp(), dst, OperandSize::S64);
+        Ok(())
     }
 
     fn frame_restore(&mut self) -> Result<()> {

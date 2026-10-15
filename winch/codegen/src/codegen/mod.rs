@@ -157,7 +157,16 @@ where
 
         self.masm.start_source_loc(Default::default())?;
         // We need to use the vmctx parameter before pinning it for stack checking.
-        self.masm.prologue(vmctx)?;
+        // With stack-limit interruption the published limit may hold the
+        // interrupt sentinel, which this trapping check must never see: it
+        // compares against the store's real limit instead, and the resumable
+        // check in `emit_body` observes the sentinel.
+        let stack_limit_offset = if self.tunables.stack_limit_interruption {
+            self.env.vmoffsets.ptr.vmstore_context_real_stack_limit()
+        } else {
+            self.env.vmoffsets.ptr.vmstore_context_stack_limit()
+        };
+        self.masm.prologue(vmctx, stack_limit_offset)?;
 
         // Pin the `VMContext` pointer.
         self.masm.mov(
@@ -321,6 +330,7 @@ where
         self.maybe_emit_fuel_check()?;
 
         self.maybe_emit_epoch_check()?;
+        self.maybe_emit_stack_limit_interrupt_check()?;
 
         // Once we have emitted the epilogue and reserved stack space for the locals, we push the
         // base control flow block.
@@ -2168,6 +2178,74 @@ where
 
         self.context.free_reg(epoch_deadline_reg);
         self.context.free_reg(epoch_counter_reg);
+        Ok(())
+    }
+
+    /// Checks if stack-limit interruption is configured and emits a
+    /// resumable compare of the stack pointer against the store's published
+    /// stack limit, calling the `stack_limit_interrupt` builtin when it fails.
+    ///
+    /// The builtin delivers a pending interruption and traps only on a real
+    /// overflow, so unlike the prologue check this never traps by itself.
+    pub fn maybe_emit_stack_limit_interrupt_check(&mut self) -> Result<()> {
+        if !self.tunables.stack_limit_interruption {
+            return Ok(());
+        }
+
+        let cont = self.masm.get_label()?;
+        let builtin = self.env.builtins.stack_limit_interrupt::<M::ABI>()?;
+        let ptr_size: OperandSize = self.env.ptr_type().try_into()?;
+
+        // As for the epoch check: keep the registers holding the limit and
+        // the stack pointer clear of the builtin's argument registers.
+        let (limit_reg, sp_reg) = self.context.without::<Result<(Reg, Reg)>, M, _>(
+            &builtin.sig().regs,
+            self.masm,
+            |cx, masm| Ok((cx.any_gpr(masm)?, cx.any_gpr(masm)?)),
+        )??;
+
+        let store_context_offset = self.env.vmoffsets.ptr.vmctx_store_context();
+        let stack_limit_offset = self.env.vmoffsets.ptr.vmstore_context_stack_limit();
+        self.masm.load_ptr(
+            self.masm
+                .address_at_vmctx(u32::from(store_context_offset))?,
+            writable!(limit_reg),
+        )?;
+        self.masm.load_ptr(
+            self.masm
+                .address_at_reg(limit_reg, u32::from(stack_limit_offset))?,
+            writable!(limit_reg),
+        )?;
+        self.masm.stack_pointer(writable!(sp_reg))?;
+
+        // Spill locals and registers to avoid conflicts at the control flow
+        // merge below.
+        self.context.spill(self.masm)?;
+        self.masm.branch(
+            IntCmpKind::GeU,
+            sp_reg,
+            RegImm::reg(limit_reg),
+            cont,
+            ptr_size,
+        )?;
+        self.context.free_reg(limit_reg);
+
+        // Failed-check branch: `stack_limit_interrupt(vmctx, sp)`. The call
+        // consumes `sp_reg`.
+        self.context
+            .stack
+            .push(TypedReg::new(self.env.ptr_type(), sp_reg).into());
+        FnCall::emit::<M>(
+            &mut self.env,
+            self.masm,
+            &mut self.context,
+            Callee::Builtin(builtin.clone()),
+        )?;
+        // The builtin's `bool` result is its trap sentinel, already checked
+        // by the builtin trampoline.
+        self.context.pop_and_free(self.masm)?;
+
+        self.masm.bind(cont)?;
         Ok(())
     }
 

@@ -15,7 +15,7 @@ use core::marker;
 use core::mem::{self, MaybeUninit};
 use core::ops::Range;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
 use wasmtime_environ::{
     BuiltinFunctionIndex, DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex,
     DefinedTagIndex, NUM_COMPONENT_CONTEXT_SLOTS, VMCONTEXT_MAGIC, VMSharedTypeIndex,
@@ -1132,10 +1132,22 @@ pub struct VMStoreContext {
     /// This field is in use only if guest debugging is enabled.
     pub execution_version: u64,
 
-    /// Current stack limit of the wasm module.
+    /// Current stack limit of the wasm module, as compiled code reads it.
+    ///
+    /// This is the store's real limit (`real_stack_limit`) except while a
+    /// stack-limit interruption is pending, when it holds
+    /// [`VMStoreContext::INTERRUPT_SENTINEL`]. It is atomic because a
+    /// [`StoreInterruptHandle`](crate::StoreInterruptHandle) stores the
+    /// sentinel from other threads and from interrupt handlers; compiled code
+    /// reads it with an ordinary load, which is a relaxed atomic load on every
+    /// supported target.
+    ///
+    /// Host code never writes it directly: every writer goes through
+    /// [`VMStoreContext::replace_stack_limit`] or
+    /// [`VMStoreContext::take_interrupt`], which consult `interrupt_pending`.
     ///
     /// For more information see `crates/cranelift/src/lib.rs`.
-    pub stack_limit: UnsafeCell<usize>,
+    pub stack_limit: AtomicUsize,
 
     /// The `VMMemoryDefinition` for this store's GC heap.
     pub gc_heap: UnsafeCell<VMMemoryDefinition>,
@@ -1217,7 +1229,7 @@ pub struct VMStoreContext {
     /// range indicating that no async guard is in use (aka no fiber). In such a
     /// situation while this field is read it'll never classify a fault as an
     /// guard page fault.
-    pub async_guard_range: Range<*mut u8>,
+    pub async_guard_range: UnsafeCell<Range<*mut u8>>,
 
     /// The `context.{get,set}` values for the current thread in the component
     /// model. This is only used for `component-model-async` and slot[1] is only
@@ -1239,6 +1251,20 @@ pub struct VMStoreContext {
     ///
     /// NB: `UnsafeCell` because JIT code writes to this field.
     pub current_thread: UnsafeCell<VMLazyThread>,
+
+    /// The stack limit the store's owner configured, which `stack_limit`
+    /// publishes whenever no interruption is pending.
+    ///
+    /// Only the thread running the store reads or writes it. Compiled code
+    /// reads it in Winch's trapping prologue check when stack-limit
+    /// interruption is enabled, so that check sees the real limit rather than
+    /// the sentinel.
+    pub real_stack_limit: UnsafeCell<usize>,
+
+    /// Whether a stack-limit interruption was requested and not yet taken by
+    /// the `stack_limit_interrupt` builtin. Host-only; compiled code never
+    /// reads it.
+    pub interrupt_pending: AtomicBool,
 }
 
 impl VMStoreContext {
@@ -1293,14 +1319,122 @@ impl VMStoreContext {
         }
     }
 
+    /// The component model's `context.{get,set}` slots.
     #[cfg(feature = "component-model-async")]
-    pub(crate) fn component_context_mut(&mut self) -> &mut [u32; NUM_COMPONENT_CONTEXT_SLOTS] {
-        self.component_context.get_mut()
+    pub(crate) fn component_context(&self) -> [u32; NUM_COMPONENT_CONTEXT_SLOTS] {
+        // SAFETY: the slots are only accessed by the thread running this
+        // store (host code here, or JIT code on its behalf, never both at
+        // once).
+        unsafe { *self.component_context.get() }
     }
 
+    /// Sets the component model's `context.{get,set}` slots.
     #[cfg(feature = "component-model-async")]
-    pub(crate) fn current_thread_mut(&mut self) -> &mut VMLazyThread {
-        self.current_thread.get_mut()
+    pub(crate) fn set_component_context(&self, context: [u32; NUM_COMPONENT_CONTEXT_SLOTS]) {
+        // SAFETY: see `component_context`.
+        unsafe { *self.component_context.get() = context }
+    }
+
+    /// The JIT-visible current thread.
+    #[cfg(feature = "component-model-async")]
+    pub(crate) fn current_thread(&self) -> VMLazyThread {
+        // SAFETY: see `component_context`.
+        unsafe { *self.current_thread.get() }
+    }
+
+    /// Sets the JIT-visible current thread.
+    #[cfg(feature = "component-model-async")]
+    pub(crate) fn set_current_thread(&self, thread: VMLazyThread) {
+        // SAFETY: see `component_context`.
+        unsafe { *self.current_thread.get() = thread }
+    }
+
+    /// The value a pending interruption stores in `stack_limit`.
+    ///
+    /// Every stack-limit check compares `sp < stack_limit`, which no stack
+    /// pointer satisfies against `usize::MAX`, so the next check fails and
+    /// calls the `stack_limit_interrupt` builtin. `usize::MAX` is also the
+    /// "no limit set yet" value of `real_stack_limit`; the two never meet,
+    /// because only `real_stack_limit` is interpreted by the host.
+    pub const INTERRUPT_SENTINEL: usize = usize::MAX;
+
+    /// The stack limit the store's owner configured.
+    pub(crate) fn real_stack_limit(&self) -> usize {
+        // SAFETY: `real_stack_limit` is only accessed by the thread that runs
+        // this store (its owner, or wasm on its behalf), never by an interrupt
+        // handle, so this read cannot race.
+        unsafe { *self.real_stack_limit.get() }
+    }
+
+    /// Sets the store's real stack limit and publishes it to compiled code,
+    /// returning the previous real limit.
+    ///
+    /// Every host path that changes the limit (entering and leaving wasm,
+    /// switching fibers) goes through here, so a pending interruption
+    /// survives all of them.
+    pub(crate) fn replace_stack_limit(&self, limit: usize) -> usize {
+        // SAFETY: see `real_stack_limit`.
+        let previous = unsafe { mem::replace(&mut *self.real_stack_limit.get(), limit) };
+        self.publish_stack_limit();
+        previous
+    }
+
+    /// Writes the real limit into `stack_limit`, then re-raises the sentinel
+    /// if an interruption is pending.
+    ///
+    /// Ordering: this is one half of a store-buffering (Dekker) pattern with
+    /// [`VMStoreContext::request_interrupt`]. The writer stores the limit and
+    /// then loads `interrupt_pending`; the requester stores
+    /// `interrupt_pending` and then the sentinel. With all four operations
+    /// `SeqCst` they are totally ordered, so either the writer's load sees
+    /// the flag (and re-stores the sentinel itself), or the requester's
+    /// sentinel store comes after the writer's limit store and survives as
+    /// the final value. A requester can never be overwritten by a writer that
+    /// missed its flag. Weaker orderings would let both sides read the stale
+    /// value of the other's location, which is exactly the lost interrupt.
+    fn publish_stack_limit(&self) {
+        self.stack_limit
+            .store(self.real_stack_limit(), Ordering::SeqCst);
+        if self.interrupt_pending.load(Ordering::SeqCst) {
+            self.stack_limit
+                .store(Self::INTERRUPT_SENTINEL, Ordering::SeqCst);
+        }
+    }
+
+    /// Requests a stack-limit interruption of this store's guest.
+    ///
+    /// Callable from any thread and from an interrupt handler on the thread
+    /// running the store: it is two atomic stores, with no allocation and no
+    /// lock. The flag is stored before the sentinel, so whoever observes the
+    /// sentinel and then takes the flag (with the acquire fence in
+    /// `take_interrupt`) finds it set; see `publish_stack_limit` for why a
+    /// concurrent writer cannot lose the request.
+    pub(crate) fn request_interrupt(&self) {
+        self.interrupt_pending.store(true, Ordering::SeqCst);
+        self.stack_limit
+            .store(Self::INTERRUPT_SENTINEL, Ordering::SeqCst);
+    }
+
+    /// Takes a pending interruption, restoring the real limit for compiled
+    /// code. Returns whether an interruption was pending.
+    ///
+    /// Called by the `stack_limit_interrupt` builtin after compiled code saw
+    /// a failing stack-limit check. The flag is cleared before the real limit
+    /// is re-armed, so a request that lands in between re-raises the sentinel
+    /// (through `publish_stack_limit`) and is delivered at the next check
+    /// instead of being cleared with this one.
+    pub(crate) fn take_interrupt(&self) -> bool {
+        // Compiled code's load of `stack_limit` that sent us here is a relaxed
+        // load. The acquire fence makes the requester's `SeqCst` (and so
+        // release) sentinel store synchronize with it, which makes the
+        // requester's earlier flag store visible to the swap below. Without
+        // it the swap could still read `false`; the request would then not be
+        // lost (the republish below re-raises the sentinel) but delivered one
+        // check late.
+        fence(Ordering::Acquire);
+        let pending = self.interrupt_pending.swap(false, Ordering::SeqCst);
+        self.publish_stack_limit();
+        pending
     }
 }
 
@@ -1320,7 +1454,7 @@ impl Default for VMStoreContext {
             fuel_consumed: UnsafeCell::new(0),
             epoch_deadline: UnsafeCell::new(0),
             execution_version: 0,
-            stack_limit: UnsafeCell::new(usize::max_value()),
+            stack_limit: AtomicUsize::new(usize::MAX),
             gc_heap: UnsafeCell::new(VMMemoryDefinition {
                 base: NonNull::dangling().into(),
                 current_length: AtomicUsize::new(0),
@@ -1331,10 +1465,12 @@ impl Default for VMStoreContext {
             last_wasm_entry_sp: UnsafeCell::new(0),
             last_wasm_entry_trap_handler: UnsafeCell::new(0),
             stack_chain: UnsafeCell::new(VMStackChain::Absent),
-            async_guard_range: ptr::null_mut()..ptr::null_mut(),
+            async_guard_range: UnsafeCell::new(ptr::null_mut()..ptr::null_mut()),
             store_data: VmPtr::dangling(),
             component_context: UnsafeCell::new([0; NUM_COMPONENT_CONTEXT_SLOTS]),
             current_thread: UnsafeCell::new(VMLazyThread::none()),
+            real_stack_limit: UnsafeCell::new(usize::MAX),
+            interrupt_pending: AtomicBool::new(false),
         }
     }
 }
@@ -1412,6 +1548,10 @@ mod test_vmstore_context {
         assert_eq!(
             offset_of!(VMStoreContext, current_thread),
             usize::from(offsets.ptr.vmstore_context_current_thread())
+        );
+        assert_eq!(
+            offset_of!(VMStoreContext, real_stack_limit),
+            usize::from(offsets.ptr.vmstore_context_real_stack_limit())
         );
 
         // Make sure that the calculation for the size of a slot is also

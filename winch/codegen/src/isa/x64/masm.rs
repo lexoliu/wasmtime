@@ -124,7 +124,7 @@ impl Masm for MacroAssembler {
         Ok(())
     }
 
-    fn check_stack(&mut self, vmctx: Reg) -> Result<()> {
+    fn check_stack(&mut self, vmctx: Reg, stack_limit_offset: u8) -> Result<()> {
         let ptr_size: u8 = self.ptr_size.bytes().try_into().unwrap();
 
         self.with_scratch::<IntScratch, _>(|masm, scratch| {
@@ -134,10 +134,7 @@ impl Masm for MacroAssembler {
             )?;
 
             masm.load_ptr(
-                Address::offset(
-                    scratch.inner(),
-                    ptr_size.vmstore_context_stack_limit().into(),
-                ),
+                Address::offset(scratch.inner(), stack_limit_offset.into()),
                 scratch.writable(),
             )?;
 
@@ -931,6 +928,11 @@ impl Masm for MacroAssembler {
         // Push the remainder.
         context.stack.push(Val::reg(rdx, divisor.ty));
 
+        Ok(())
+    }
+
+    fn stack_pointer(&mut self, dst: WritableReg) -> Result<()> {
+        self.asm.mov_rr(regs::rsp(), dst, OperandSize::S64);
         Ok(())
     }
 
