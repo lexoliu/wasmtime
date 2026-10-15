@@ -564,7 +564,11 @@ impl wasmtime_environ::Compiler for Compiler {
                 .stack_limit()
                 .to_deferred_load(&mut context.func);
             let stack_limit = VmctxLoadChain::new([store_ctx, stack_limit].into());
-            if self.tunables.signals_based_traps {
+            // Stack-limit interruption raises this limit to a sentinel and
+            // needs the failed check to resume, which the ISA-level prologue
+            // check (a trap) cannot do: use the explicit check, which
+            // `before_translate_function` makes resumable.
+            if self.tunables.signals_based_traps && !self.tunables.stack_limit_interruption {
                 let stack_limit = stack_limit.emit_global(&mut context.func);
                 context.func.stack_limit = Some(stack_limit);
             } else {

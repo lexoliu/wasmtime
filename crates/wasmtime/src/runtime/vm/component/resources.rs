@@ -339,14 +339,14 @@ impl ResourceTables<'_> {
         &mut self,
         index: TypedResourceIndex,
         lazy_lenders: &mut [VMResourceIndex],
-        vm_store_context: &mut VMStoreContext,
+        vm_store_context: &VMStoreContext,
     ) -> Result<Option<u32>> {
         // A forced thread already has a `CallContext`, and anything recorded
         // here would never be promoted into it.
-        debug_assert!(vm_store_context.current_thread_mut().is_deferred());
+        debug_assert!(vm_store_context.current_thread().is_deferred());
 
-        let lazy_lenders_len = vm_store_context.lazy_lenders_len_mut();
-        let Some(slot) = lazy_lenders.get_mut(*lazy_lenders_len) else {
+        let lazy_lenders_len = vm_store_context.lazy_lenders_len();
+        let Some(slot) = lazy_lenders.get_mut(lazy_lenders_len) else {
             return Ok(None);
         };
         let rep = self
@@ -354,7 +354,7 @@ impl ResourceTables<'_> {
             .0
             .resource_lend_deferred(index)?;
         *slot = VMResourceIndex::new(index);
-        *lazy_lenders_len += 1;
+        vm_store_context.set_lazy_lenders_len(lazy_lenders_len + 1);
         Ok(Some(rep))
     }
 

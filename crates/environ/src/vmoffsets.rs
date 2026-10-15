@@ -54,6 +54,7 @@ fn align(offset: u32, width: u32) -> u32 {
 macro_rules! define_vm_type_offsets {
     // `UnsafeCell<T>` is `repr(transparent)`, so it has exactly `T`'s layout;
     // delegate to the inner type.
+    (@size ($p:expr) UnsafeCell < Range < *mut u8 >>) => { 2u32 * u32::from($p) };
     (@size ($p:expr) UnsafeCell < $inner:tt >) => { define_vm_type_offsets!(@size ($p) $inner) };
 
     // Classify a field type to its size in bytes as a `u32`, given `$p` (the
@@ -64,7 +65,10 @@ macro_rules! define_vm_type_offsets {
     (@size ($p:expr) VmPtr < $g:ty >) => { u32::from($p) };
     (@size ($p:expr) VmPtr < VmPtr < $g:ty >>) => { u32::from($p) };
     (@size ($p:expr) Option < VmPtr < $g:ty >>) => { u32::from($p) };
+    (@size ($p:expr) AtomicPtr < $g:ty >) => { u32::from($p) };
     (@size ($p:expr) AtomicUsize) => { u32::from($p) };
+    (@size ($p:expr) AtomicBool) => { 1u32 };
+    (@size ($p:expr) bool) => { 1u32 };
     (@size ($p:expr) usize) => { u32::from($p) };
     (@size ($p:expr) i64) => { 8u32 };
     (@size ($p:expr) u64) => { 8u32 };
@@ -113,6 +117,7 @@ macro_rules! define_vm_type_offsets {
     (@size ($p:expr) PhantomPinned) => { 0u32 };
 
     // As with `@size` above, `UnsafeCell<T>` has exactly `T`'s alignment.
+    (@align ($p:expr) UnsafeCell < Range < *mut u8 >>) => { u32::from($p) };
     (@align ($p:expr) UnsafeCell < $inner:tt >) => { define_vm_type_offsets!(@align ($p) $inner) };
 
     // Classify a field type to its alignment in bytes as a `u32`, given `$p`
@@ -125,7 +130,10 @@ macro_rules! define_vm_type_offsets {
     (@align ($p:expr) VmPtr < $g:ty >) => { u32::from($p) };
     (@align ($p:expr) VmPtr < VmPtr < $g:ty >>) => { u32::from($p) };
     (@align ($p:expr) Option < VmPtr < $g:ty >>) => { u32::from($p) };
+    (@align ($p:expr) AtomicPtr < $g:ty >) => { u32::from($p) };
     (@align ($p:expr) AtomicUsize) => { u32::from($p) };
+    (@align ($p:expr) AtomicBool) => { 1u32 };
+    (@align ($p:expr) bool) => { 1u32 };
     (@align ($p:expr) usize) => { u32::from($p) };
     (@align ($p:expr) i64) => { 8u32 };
     (@align ($p:expr) u64) => { 8u32 };

@@ -102,6 +102,12 @@ define_tunables! {
         /// Whether to generate the polling code to support MMU interruption.
         pub mmu_interruption: bool,
 
+        /// Whether or not guest code is interrupted through the store's stack
+        /// limit: every function entry and loop header compares the stack
+        /// pointer with `VMStoreContext::stack_limit` and, when the compare
+        /// fails, calls a resumable builtin instead of trapping.
+        pub stack_limit_interruption: bool,
+
         /// Whether or not linear memories are allowed to be reallocated after
         /// initial allocation at runtime.
         pub memory_may_move: bool,
@@ -280,6 +286,7 @@ impl Tunables {
             operator_cost: OperatorCostStrategy::Default,
             epoch_interruption: false,
             mmu_interruption: false,
+            stack_limit_interruption: false,
             memory_may_move: true,
             guard_before_linear_memory: true,
             table_lazy_init: true,

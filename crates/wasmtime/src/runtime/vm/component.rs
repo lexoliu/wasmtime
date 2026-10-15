@@ -296,8 +296,18 @@ pub enum TransmitLocalStateKind {
 }
 
 impl VMStoreContext {
-    pub(crate) fn current_thread_mut(&mut self) -> &mut VMLazyThread {
-        self.current_thread.get_mut()
+    /// The JIT-visible current thread.
+    pub(crate) fn current_thread(&self) -> VMLazyThread {
+        // SAFETY: only accessed by the thread running this store (host code
+        // here, or JIT code on its behalf, never both at once).
+        unsafe { *self.current_thread.get() }
+    }
+
+    /// Sets the JIT-visible current thread.
+    #[cfg(feature = "component-model-async")]
+    pub(crate) fn set_current_thread(&self, thread: VMLazyThread) {
+        // SAFETY: see `current_thread`.
+        unsafe { *self.current_thread.get() = thread }
     }
 
     /// Points `lazy_lenders` at the store's buffer.
@@ -314,8 +324,14 @@ impl VMStoreContext {
         self.lazy_lenders = buf.cast::<VMResourceIndex>().into();
     }
 
-    pub(crate) fn lazy_lenders_len_mut(&mut self) -> &mut usize {
-        self.lazy_lenders_len.get_mut()
+    pub(crate) fn lazy_lenders_len(&self) -> usize {
+        // SAFETY: see `current_thread`.
+        unsafe { *self.lazy_lenders_len.get() }
+    }
+
+    pub(crate) fn set_lazy_lenders_len(&self, len: usize) {
+        // SAFETY: see `current_thread`.
+        unsafe { *self.lazy_lenders_len.get() = len }
     }
 }
 

@@ -304,6 +304,7 @@ impl Metadata<'_> {
             ref operator_cost,
             epoch_interruption,
             mmu_interruption,
+            stack_limit_interruption,
             memory_may_move,
             guard_before_linear_memory,
             table_lazy_init,
@@ -384,6 +385,11 @@ impl Metadata<'_> {
             "epoch interruption",
         )?;
         Self::check_bool(mmu_interruption, other.mmu_interruption, "MMU interruption")?;
+        Self::check_bool(
+            stack_limit_interruption,
+            other.stack_limit_interruption,
+            "stack-limit interruption",
+        )?;
         Self::check_bool(memory_may_move, other.memory_may_move, "memory may move")?;
         Self::check_bool(
             guard_before_linear_memory,

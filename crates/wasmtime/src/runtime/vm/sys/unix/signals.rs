@@ -171,7 +171,8 @@ unsafe extern "C" fn trap_handler(
         match test {
             TrapTest::NotWasm => {
                 if let Some(faulting_addr) = faulting_addr {
-                    let range = unsafe { &info.vm_store_context.get().as_ref().async_guard_range };
+                    let range =
+                        unsafe { &*info.vm_store_context.get().as_ref().async_guard_range.get() };
                     if range.start.addr() <= faulting_addr && faulting_addr < range.end.addr() {
                         abort_stack_overflow();
                     }

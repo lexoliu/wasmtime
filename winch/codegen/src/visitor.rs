@@ -2014,6 +2014,7 @@ where
         }
 
         self.maybe_emit_epoch_check()?;
+        self.maybe_emit_stack_limit_interrupt_check()?;
         self.maybe_emit_fuel_check()
     }
 

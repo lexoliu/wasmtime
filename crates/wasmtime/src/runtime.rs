@@ -105,8 +105,8 @@ pub use resources::*;
 #[cfg(all(feature = "async", feature = "call-hook"))]
 pub use store::CallHookHandler;
 pub use store::{
-    AsContext, AsContextMut, CallHook, Store, StoreContext, StoreContextMut, StoreHookState,
-    UpdateDeadline,
+    AsContext, AsContextMut, CallHook, InterruptAction, Store, StoreContext, StoreContextMut,
+    StoreHookState, StoreInterruptHandle, UpdateDeadline,
 };
 pub use trap::*;
 pub use types::*;

@@ -179,10 +179,12 @@ impl<'a, T: 'static> LowerContext<'a, T> {
         // state so nothing else needs adjusting. Note though that the original
         // values are preserved still to get restored after this call.
         #[cfg(feature = "component-model-async")]
-        let orig_context = core::mem::replace(
-            self.store.0.vm_store_context_mut().component_context_mut(),
-            Default::default(),
-        );
+        let orig_context = {
+            let vm_store_context = self.store.0.vm_store_context();
+            let orig = vm_store_context.component_context();
+            vm_store_context.set_component_context(Default::default());
+            orig
+        };
 
         let (component, store) = self.instance.component_and_store_mut(self.store.0);
         let instance = self.instance.id().get(store);
@@ -242,7 +244,10 @@ impl<'a, T: 'static> LowerContext<'a, T> {
         // it's ok if this isn't restored.
         #[cfg(feature = "component-model-async")]
         {
-            *self.store.0.vm_store_context_mut().component_context_mut() = orig_context;
+            self.store
+                .0
+                .vm_store_context()
+                .set_component_context(orig_context);
         }
 
         Ok(result)
@@ -406,12 +411,7 @@ impl<'a> LiftContext<'a> {
 
         // Computing the scope forces any deferred thread, so host lifts never
         // record lazy lends and always see a complete `lend_count`.
-        debug_assert!(
-            !store
-                .vm_store_context_mut()
-                .current_thread_mut()
-                .is_deferred()
-        );
+        debug_assert!(!store.vm_store_context().current_thread().is_deferred());
 
         // From `&mut StoreOpaque` provided the goal here is to project out
         // three different disjoint fields owned by the store: memory,

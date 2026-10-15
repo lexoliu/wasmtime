@@ -459,12 +459,7 @@ impl StoreOpaque {
         &mut self,
     ) -> &mut ConcurrentState {
         debug_assert!(self.concurrency_support());
-        debug_assert!(
-            !self
-                .vm_store_context_mut()
-                .current_thread_mut()
-                .is_deferred()
-        );
+        debug_assert!(!self.vm_store_context().current_thread().is_deferred());
         self.concurrent_state_mut_without_forcing_current_thread()
     }
 
@@ -544,11 +539,7 @@ impl StoreOpaque {
     ) -> Result<u32> {
         // NB: this check must happen before anything calls `current_scope()`,
         // which is itself the call that forces the thread.
-        if self
-            .vm_store_context_mut()
-            .current_thread_mut()
-            .is_deferred()
-        {
+        if self.vm_store_context().current_thread().is_deferred() {
             let store_id = self.id();
             let (vm_store_context, store_data) = self.vm_store_context_and_store_data_mut();
             let (mut tables, _, lazy_lenders) =
@@ -586,7 +577,7 @@ impl StoreOpaque {
         start: usize,
         end: usize,
     ) -> Result<()> {
-        debug_assert!(start <= end && end <= *self.vm_store_context_mut().lazy_lenders_len_mut());
+        debug_assert!(start <= end && end <= self.vm_store_context().lazy_lenders_len());
         let store_id = self.id();
         let (mut tables, _, lazy_lenders) =
             self.component_data_mut()

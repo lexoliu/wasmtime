@@ -391,10 +391,22 @@ macro_rules! for_each_vm_type {
                 /// This field is in use only if guest debugging is enabled.
                 pub execution_version: u64,
 
-                /// Current stack limit of the wasm module.
+                /// Current stack limit of the wasm module, as compiled code reads it.
+                ///
+                /// This is the store's real limit (`real_stack_limit`) except while a
+                /// stack-limit interruption is pending, when it holds
+                /// [`VMStoreContext::INTERRUPT_SENTINEL`]. It is atomic because a
+                /// [`StoreInterruptHandle`](crate::StoreInterruptHandle) stores the
+                /// sentinel from other threads and from interrupt handlers; compiled code
+                /// reads it with an ordinary load, which is a relaxed atomic load on every
+                /// supported target.
+                ///
+                /// Host code never writes it directly: every writer goes through
+                /// [`VMStoreContext::replace_stack_limit`] or
+                /// [`VMStoreContext::take_interrupt`], which consult `interrupt_pending`.
                 ///
                 /// For more information see `crates/cranelift/src/lib.rs`.
-                pub stack_limit: UnsafeCell<usize>,
+                pub stack_limit: AtomicUsize,
 
                 /// The `VMMemoryDefinition` for this store's GC heap.
                 #[aggregate]
@@ -484,7 +496,7 @@ macro_rules! for_each_vm_type {
                 /// situation while this field is read it'll never classify a fault as an
                 /// guard page fault.
                 #[aggregate]
-                pub async_guard_range: Range<*mut u8>,
+                pub async_guard_range: UnsafeCell<Range<*mut u8>>,
 
                 /// The `context.{get,set}` values for the current thread in the component
                 /// model. This is only used for `component-model-async` and slot[1] is only
@@ -520,6 +532,21 @@ macro_rules! for_each_vm_type {
                 ///
                 /// NB: `UnsafeCell` because JIT code writes to this field.
                 pub lazy_lenders_len: UnsafeCell<usize>,
+
+                /// The stack limit the store's owner configured, which `stack_limit`
+                /// publishes whenever no interruption is pending.
+                ///
+                /// Only the thread running the store reads or writes it. Compiled code
+                /// reads it in Winch's trapping prologue check when stack-limit
+                /// interruption is enabled, so that check sees the real limit rather than
+                /// the sentinel.
+                pub real_stack_limit: UnsafeCell<usize>,
+
+                /// Whether a stack-limit interruption was requested and not yet taken by
+                /// the `stack_limit_interrupt` builtin. Host-only; compiled code never
+                /// reads it.
+                #[aggregate]
+                pub interrupt_pending: AtomicBool,
             }
 
             /// JIT-visible representation of the store's current thread for the component

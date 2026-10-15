@@ -96,6 +96,7 @@ use crate::trampoline::VMHostGlobalContext;
 use crate::{Breakpoints, DebugHandler, FrameDataCache};
 use crate::{Engine, Module, Val, ValRaw, module::ModuleRegistry};
 use crate::{Global, Instance, Table};
+use alloc::sync::Arc;
 use core::convert::Infallible;
 use core::fmt;
 #[cfg(any(feature = "async", feature = "gc"))]
@@ -247,6 +248,8 @@ pub struct StoreInner<T: 'static> {
     #[cfg(target_has_atomic = "64")]
     epoch_deadline_behavior:
         Option<Box<dyn FnMut(StoreHookState<T>) -> Result<UpdateDeadline> + Send + Sync>>,
+    interrupt_behavior:
+        Option<Box<dyn FnMut(StoreContextMut<T>) -> Result<InterruptAction> + Send + Sync>>,
 
     /// The user's `T` data.
     ///
@@ -420,6 +423,62 @@ pub enum UpdateDeadline {
     ),
 }
 
+/// What to do after the callback configured with
+/// [`Store::interrupt_callback`] handled a stack-limit interruption.
+///
+/// Returning an error from the callback instead ends execution: the error is
+/// what the interrupted call returns, the same way an error from an
+/// [`Store::epoch_deadline_callback`] callback is.
+#[non_exhaustive]
+pub enum InterruptAction {
+    /// Resume the guest immediately.
+    Continue,
+    /// Yield to the async executor, then resume the guest when the future is
+    /// next polled.
+    ///
+    /// This can only be used when WebAssembly is invoked with `*_async`
+    /// methods. If WebAssembly was invoked with a synchronous method then
+    /// returning this variant raises an error.
+    #[cfg(feature = "async")]
+    Yield,
+}
+
+/// A `Send + Sync` handle that requests a stack-limit interruption of one
+/// [`Store`]'s guest.
+///
+/// Obtained from [`Store::interrupt_handle`], which requires
+/// [`Config::stack_limit_interruption`](crate::Config::stack_limit_interruption).
+/// [`StoreInterruptHandle::interrupt`] is two atomic stores, with no
+/// allocation and no lock, so it may be called from another thread or from
+/// an interrupt handler. The handle keeps the store's runtime context
+/// alive, so calling it after the store is dropped is harmless: the request
+/// lands on memory nobody reads any more.
+#[derive(Clone)]
+pub struct StoreInterruptHandle {
+    vm_store_context: Arc<VMStoreContext>,
+}
+
+impl StoreInterruptHandle {
+    /// Requests that the store's guest be interrupted.
+    ///
+    /// The guest observes the request at its next function entry, loop
+    /// header or bulk-memory chunk, and runs the store's
+    /// [`Store::interrupt_callback`] there. A request made while the store
+    /// runs host code, or while its guest is suspended on a fiber, is
+    /// delivered when the guest next runs one of those checks. Requests made
+    /// before the guest observes one coalesce into a single interruption.
+    pub fn interrupt(&self) {
+        self.vm_store_context.request_interrupt();
+    }
+}
+
+impl fmt::Debug for StoreInterruptHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoreInterruptHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 // Forward methods on `StoreOpaque` to also being on `StoreInner<T>`
 impl<T> Deref for StoreInner<T> {
     type Target = StoreOpaque;
@@ -465,7 +524,10 @@ pub struct StoreOpaque {
     _marker: marker::PhantomPinned,
 
     engine: Engine,
-    vm_store_context: VMStoreContext,
+    /// Shared with every [`StoreInterruptHandle`], which may outlive the
+    /// store; only `stack_limit` and `interrupt_pending` are ever touched
+    /// through a handle.
+    vm_store_context: Arc<VMStoreContext>,
 
     // Contains all continuations ever allocated throughout the lifetime of this
     // store.
@@ -753,7 +815,7 @@ impl<T> Store<T> {
         let inner = StoreOpaque {
             _marker: marker::PhantomPinned,
             engine: engine.clone(),
-            vm_store_context: Default::default(),
+            vm_store_context: try_new::<Arc<_>>(VMStoreContext::default())?,
             #[cfg(feature = "stack-switching")]
             continuations: Vec::new(),
             instances: TryPrimaryMap::new(),
@@ -793,6 +855,7 @@ impl<T> Store<T> {
             call_hook: None,
             #[cfg(target_has_atomic = "64")]
             epoch_deadline_behavior: None,
+            interrupt_behavior: None,
             data_no_provenance: ManuallyDrop::new(data),
             #[cfg(feature = "debug")]
             debug_handler: None,
@@ -800,18 +863,19 @@ impl<T> Store<T> {
 
         let store_data =
             <NonNull<ManuallyDrop<T>>>::from(&mut inner.data_no_provenance).cast::<()>();
-        inner.inner.vm_store_context.store_data = store_data.into();
-
-        // SAFETY: `store_data` and the `VMStoreContext` beside it live in the
-        // same boxed `StoreInner`, so neither outlives nor moves out from under
-        // the other.
+        // SAFETY: `store_data` lives in the boxed `StoreInner`, which outlives
+        // all JIT execution in this store; a `StoreInterruptHandle` that
+        // outlives the store touches only `interrupt_pending` and `stack_limit`.
         unsafe {
             let StoreOpaque {
-                store_data,
+                store_data: opaque_store_data,
                 vm_store_context,
                 ..
             } = &mut inner.inner;
-            store_data.publish_to_vm_store_context(vm_store_context);
+            let vm_store_context = Arc::get_mut(vm_store_context)
+                .expect("no interrupt handle exists before the store is constructed");
+            vm_store_context.store_data = store_data.into();
+            opaque_store_data.publish_to_vm_store_context(vm_store_context);
         }
 
         inner.traitobj = StorePtr(Some(NonNull::from(&mut *inner)));
@@ -1198,6 +1262,38 @@ impl<T> Store<T> {
         callback: impl FnMut(StoreHookState<T>) -> Result<UpdateDeadline> + Send + Sync + 'static,
     ) {
         self.inner.epoch_deadline_callback(Box::new(callback));
+    }
+
+    /// Returns a handle that requests a stack-limit interruption of this
+    /// store's guest from any thread or interrupt handler.
+    ///
+    /// See [`Config::stack_limit_interruption`](crate::Config::stack_limit_interruption)
+    /// for the mechanism and [`Store::interrupt_callback`] for what an
+    /// interruption does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store's engine was not configured with
+    /// [`Config::stack_limit_interruption`](crate::Config::stack_limit_interruption),
+    /// since compiled code would then report the request as a stack overflow.
+    pub fn interrupt_handle(&self) -> Result<StoreInterruptHandle> {
+        self.inner.interrupt_handle()
+    }
+
+    /// Configures what a stack-limit interruption does.
+    ///
+    /// When a [`StoreInterruptHandle`] requested an interruption and the guest
+    /// reaches its next check, the provided callback runs in host context.
+    /// It returns an [`InterruptAction`] to continue or yield, or an error,
+    /// which ends execution and is what the interrupted call returns.
+    ///
+    /// Without a callback, an interruption traps with
+    /// [`Trap::Interrupt`](crate::Trap::Interrupt).
+    pub fn interrupt_callback(
+        &mut self,
+        callback: impl FnMut(StoreContextMut<T>) -> Result<InterruptAction> + Send + Sync + 'static,
+    ) {
+        self.inner.interrupt_behavior = Some(Box::new(callback));
     }
 
     /// Tests whether there is a pending exception.
@@ -1669,8 +1765,8 @@ impl StoreOpaque {
     #[cfg(feature = "component-model")]
     pub(crate) fn vm_store_context_and_store_data_mut(
         &mut self,
-    ) -> (&mut VMStoreContext, &mut StoreData) {
-        (&mut self.vm_store_context, &mut self.store_data)
+    ) -> (&VMStoreContext, &mut StoreData) {
+        (&self.vm_store_context, &mut self.store_data)
     }
 
     #[cfg(feature = "debug")]
@@ -1901,9 +1997,18 @@ impl StoreOpaque {
         &self.vm_store_context
     }
 
-    #[inline]
-    pub fn vm_store_context_mut(&mut self) -> &mut VMStoreContext {
-        &mut self.vm_store_context
+    /// Returns a handle that interrupts this store's guest from any thread.
+    ///
+    /// See [`Store::interrupt_handle`].
+    pub fn interrupt_handle(&self) -> Result<StoreInterruptHandle> {
+        crate::ensure!(
+            self.engine().tunables().stack_limit_interruption,
+            "stack-limit interruption is not enabled in this store's engine \
+             (see `Config::stack_limit_interruption`)"
+        );
+        Ok(StoreInterruptHandle {
+            vm_store_context: self.vm_store_context.clone(),
+        })
     }
 
     /// Attempts to access the GC store that has been previously allocated.
@@ -2053,7 +2158,7 @@ impl StoreOpaque {
 
     #[inline]
     pub fn vm_store_context_ptr(&self) -> NonNull<VMStoreContext> {
-        NonNull::from(&self.vm_store_context)
+        NonNull::from(&*self.vm_store_context)
     }
 
     #[inline]
@@ -2373,12 +2478,17 @@ at https://bytecodealliance.org/security.
         // on the stack, the Wasm will reload the new value once we
         // return into it.
         let current_epoch = self.engine().current_epoch();
-        let epoch_deadline = self.vm_store_context.epoch_deadline.get_mut();
-        *epoch_deadline = current_epoch.saturating_add(delta).min(u64::MAX - 1);
+        // SAFETY: `epoch_deadline` is only accessed by the thread running
+        // this store, which `&mut self` proves is us.
+        unsafe {
+            *self.vm_store_context.epoch_deadline.get() =
+                current_epoch.saturating_add(delta).min(u64::MAX - 1);
+        }
     }
 
     pub(crate) fn get_epoch_deadline(&mut self) -> u64 {
-        *self.vm_store_context.epoch_deadline.get_mut()
+        // SAFETY: see `set_epoch_deadline`.
+        unsafe { *self.vm_store_context.epoch_deadline.get() }
     }
 
     #[inline]
@@ -2511,6 +2621,20 @@ unsafe impl<T> VMStore for StoreInner<T> {
             Some(callback) => callback(StoreHookState::new((&mut **store).as_context_mut())),
             None => Ok(UpdateDeadline::Interrupt),
         }
+    }
+
+    fn stack_limit_interrupted(&mut self) -> Result<InterruptAction> {
+        // Temporarily take the configured behavior to avoid mutably borrowing
+        // multiple times.
+        let mut behavior = self.interrupt_behavior.take();
+        let action = match &mut behavior {
+            Some(callback) => callback((&mut *self).as_context_mut()),
+            None => Err(crate::Trap::Interrupt.into()),
+        };
+
+        // Put back the original behavior which was replaced by `take`.
+        self.interrupt_behavior = behavior;
+        action
     }
 
     #[cfg(feature = "debug")]
