@@ -3,7 +3,7 @@ use crate::prelude::*;
 use crate::runtime::vm::memory::{
     DefaultMemoryCreator, LocalMemory, RuntimeMemoryCreator, validate_atomic_addr,
 };
-use crate::runtime::vm::parking_spot::{ParkingSpot, Waiter};
+use crate::runtime::vm::parking_spot::{self, ParkingSpot, Waiter};
 use crate::runtime::vm::{self, Memory, VMMemoryDefinition, WaitResult};
 use crate::sync::RwLock;
 use alloc::sync::Arc;
@@ -12,8 +12,6 @@ use core::ops::Range;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use core::time::Duration;
-#[cfg(feature = "std")]
-use std::time::Instant;
 use wasmtime_environ::Trap;
 
 /// For shared memory (and only for shared memory), this lock-version restricts
@@ -158,14 +156,10 @@ impl SharedMemory {
         assert!(mem::align_of::<AtomicU32>() <= 4);
         let atomic = unsafe { AtomicU32::from_ptr(addr.cast()) };
 
-        // Note that `checked_add` is used such that when `timeout` is too large
-        // it'll cause there to be no timeout at all if we can't represent the
-        // deadline. That effectively maps to the requested timeout since if we
-        // can't represent the deadline we'll be here awhile.
-        #[cfg(feature = "std")]
-        let deadline = timeout.and_then(|d| Instant::now().checked_add(d));
-        #[cfg(not(feature = "std"))]
-        let deadline = timeout;
+        // When `timeout` is too large to represent as a deadline there is no
+        // timeout at all. That effectively maps to the requested timeout since
+        // if we can't represent the deadline we'll be here awhile.
+        let deadline = timeout.and_then(parking_spot::deadline_after);
 
         let mut waiter = Waiter::new();
         Ok(self.0.spot.wait32(atomic, expected, deadline, &mut waiter))
@@ -188,11 +182,8 @@ impl SharedMemory {
         assert!(mem::align_of::<AtomicU64>() <= 8);
         let atomic = unsafe { AtomicU64::from_ptr(addr.cast()) };
 
-        // See `atomic_wait32` for why this is using `checked_add`.
-        #[cfg(feature = "std")]
-        let deadline = timeout.and_then(|d| Instant::now().checked_add(d));
-        #[cfg(not(feature = "std"))]
-        let deadline = timeout;
+        // See `atomic_wait32` for the unrepresentable-deadline case.
+        let deadline = timeout.and_then(parking_spot::deadline_after);
 
         let mut waiter = Waiter::new();
         Ok(self.0.spot.wait64(atomic, expected, deadline, &mut waiter))

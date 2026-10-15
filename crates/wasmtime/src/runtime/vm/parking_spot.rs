@@ -17,17 +17,63 @@ use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};
-#[cfg(not(feature = "std"))]
 use core::time::Duration;
 #[cfg(feature = "std")]
 use std::thread::{self, Thread};
 #[cfg(feature = "std")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(feature = "std")]
 type WaitDeadline = Instant;
 #[cfg(not(feature = "std"))]
-type WaitDeadline = Duration;
+type WaitDeadline = MonotonicDeadline;
+
+/// Returns the deadline that lies `timeout` from now, or `None` when that
+/// point cannot be represented, which a waiter treats as no timeout at all:
+/// a deadline that far out is never reached.
+#[cfg(feature = "std")]
+pub fn deadline_after(timeout: Duration) -> Option<WaitDeadline> {
+    Instant::now().checked_add(timeout)
+}
+
+/// Returns the deadline that lies `timeout` from now on the embedder's
+/// monotonic clock, or `None` when that point cannot be represented, which a
+/// waiter treats as no timeout at all: a deadline that far out is never
+/// reached.
+#[cfg(not(feature = "std"))]
+pub fn deadline_after(timeout: Duration) -> Option<WaitDeadline> {
+    MonotonicDeadline::after(monotonic_nanos(), timeout)
+}
+
+/// An absolute wait deadline on the embedder's monotonic clock, in the
+/// nanoseconds `wasmtime_monotonic_nanos` reports.
+///
+/// A `no_std` build has no `Instant`, so the deadline is the clock reading
+/// at which the wait gives up. Each park is bounded by the time that remains
+/// until it, so a wake that was not a notify parks again only for the
+/// remainder, and the wait times out once the clock reaches the deadline.
+#[cfg(any(test, not(feature = "std")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MonotonicDeadline {
+    nanos: u64,
+}
+
+#[cfg(any(test, not(feature = "std")))]
+impl MonotonicDeadline {
+    /// The deadline `timeout` after the clock reading `now_nanos`, or `None`
+    /// when it does not fit the clock's `u64` range.
+    fn after(now_nanos: u64, timeout: Duration) -> Option<Self> {
+        let timeout = u64::try_from(timeout.as_nanos()).ok()?;
+        let nanos = now_nanos.checked_add(timeout)?;
+        Some(Self { nanos })
+    }
+
+    /// The time left until this deadline at the clock reading `now_nanos`,
+    /// or `None` once the deadline has been reached.
+    fn remaining(self, now_nanos: u64) -> Option<Duration> {
+        (self.nanos > now_nanos).then(|| Duration::from_nanos(self.nanos - now_nanos))
+    }
+}
 
 #[derive(Default, Debug)]
 struct Spot {
@@ -353,7 +399,15 @@ fn timeout_before_deadline(deadline: Option<WaitDeadline>) -> Option<Duration> {
 
 #[cfg(not(feature = "std"))]
 fn timeout_before_deadline(deadline: Option<WaitDeadline>) -> Option<Duration> {
-    Some(deadline.unwrap_or(Duration::MAX))
+    match deadline {
+        Some(deadline) => deadline.remaining(monotonic_nanos()),
+        None => Some(Duration::MAX),
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn monotonic_nanos() -> u64 {
+    unsafe { wasmtime_monotonic_nanos() }
 }
 
 #[cfg(feature = "std")]
@@ -372,14 +426,28 @@ fn park_current_thread(timeout: Duration) {
 
 #[cfg(not(feature = "std"))]
 unsafe extern "C" {
+    /// Blocks the calling thread until `wasmtime_parking_unpark` is called or
+    /// `timeout_nanos` nanoseconds pass; `u64::MAX` means no timeout. It may
+    /// also return for neither reason: the wait loop re-checks its own
+    /// notification and deadline after every return.
     fn wasmtime_parking_wait(timeout_nanos: u64);
+    /// Wakes the threads blocked in `wasmtime_parking_wait`. Called with the
+    /// parking table's lock held, once for every waiter that was notified.
     fn wasmtime_parking_unpark();
+    /// Returns the current reading of a monotonic clock, in nanoseconds.
+    ///
+    /// The clock never goes backwards and every thread that can wait reads
+    /// the same timeline, because a timed wait computes its deadline from
+    /// one reading and compares later readings against it, possibly on
+    /// another processor.
+    fn wasmtime_monotonic_nanos() -> u64;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ParkingSpot, Waiter};
+    use super::{MonotonicDeadline, ParkingSpot, Waiter, deadline_after};
     use crate::prelude::*;
+    use crate::runtime::vm::WaitResult;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -656,6 +724,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn monotonic_deadline_counts_down_to_timeout() {
+        let timeout = Duration::from_millis(10);
+        let deadline = MonotonicDeadline::after(1_000, timeout).unwrap();
+
+        // A wake before the deadline parks again only for the time left.
+        assert_eq!(deadline.remaining(1_000), Some(timeout));
+        assert_eq!(
+            deadline.remaining(1_000 + 4_000_000),
+            Some(Duration::from_nanos(6_000_000))
+        );
+        assert_eq!(
+            deadline.remaining(1_000 + 9_999_999),
+            Some(Duration::from_nanos(1))
+        );
+
+        // Once the clock reaches the deadline the wait has timed out.
+        assert_eq!(deadline.remaining(1_000 + 10_000_000), None);
+        assert_eq!(deadline.remaining(u64::MAX), None);
+    }
+
+    #[test]
+    fn monotonic_deadline_beyond_the_clock_is_no_timeout() {
+        assert_eq!(
+            MonotonicDeadline::after(1, Duration::from_nanos(u64::MAX)),
+            None
+        );
+        assert_eq!(MonotonicDeadline::after(0, Duration::MAX), None);
+        assert!(MonotonicDeadline::after(0, Duration::from_nanos(u64::MAX)).is_some());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn wait_without_notify_times_out() {
+        let parking_spot = ParkingSpot::default();
+        let atomic = AtomicU64::new(0);
+        let mut waiter = Waiter::new();
+        let timeout = Duration::from_millis(20);
+
+        let start = Instant::now();
+        let result = parking_spot.wait64(&atomic, 0, deadline_after(timeout), &mut waiter);
+
+        assert_eq!(result, WaitResult::TimedOut);
+        assert!(start.elapsed() >= timeout);
     }
 
     #[test]
