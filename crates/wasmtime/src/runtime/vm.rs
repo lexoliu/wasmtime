@@ -429,7 +429,32 @@ pub enum WaitResult {
     /// Indicates that `wait` completed with a timeout, meaning that the
     /// original value matched as expected but nothing ever called `notify`.
     TimedOut = 2,
+    /// Indicates that the embedder cancelled the wait while it was parked:
+    /// on `no_std`, `wasmtime_parking_wait` reported a cancellation. The
+    /// waiter is no longer queued, so no later `notify` counts it; a `notify`
+    /// that dequeued it before the cancellation was observed keeps its count.
+    ///
+    /// A wasm `memory.atomic.wait` never returns this: the instruction traps
+    /// with [`AtomicWaitCancelled`] instead, so the cancelled fiber unwinds.
+    Cancelled = 3,
 }
+
+/// The error a `memory.atomic.wait32` or `memory.atomic.wait64` instruction
+/// traps with when the embedder cancelled the wait
+/// ([`WaitResult::Cancelled`]).
+///
+/// It is not a guest fault: the embedder asked the waiting fiber to unwind,
+/// and it can tell this error apart from a wasm trap by downcasting to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicWaitCancelled;
+
+impl core::fmt::Display for AtomicWaitCancelled {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("memory.atomic.wait was cancelled by the embedder")
+    }
+}
+
+impl core::error::Error for AtomicWaitCancelled {}
 
 /// Description about a fault that occurred in WebAssembly.
 #[derive(Debug)]

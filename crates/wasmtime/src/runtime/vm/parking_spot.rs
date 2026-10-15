@@ -125,6 +125,12 @@ impl ParkingSpot {
     /// The `waiter` argument is metadata used by this structure to block
     /// the current thread.
     ///
+    /// On `no_std` the embedder's `wasmtime_parking_wait` may report that it
+    /// cancelled the park, and then `WaitResult::Cancelled` is returned. A
+    /// waiter that no notification reached leaves the queue, so no later
+    /// `notify` counts it; one that a notification reached first stays
+    /// counted by that `notify`, having been woken before it was cancelled.
+    ///
     /// This method will not spuriously wake up one blocked.
     pub fn wait32(
         &self,
@@ -163,6 +169,19 @@ impl ParkingSpot {
         validate: impl FnOnce() -> bool,
         deadline: Option<WaitDeadline>,
         waiter: &mut Waiter,
+    ) -> WaitResult {
+        self.wait_parking_with(key, validate, deadline, waiter, park_current_thread)
+    }
+
+    /// The body of `wait`, parking through `park` so the queue logic can be
+    /// exercised without the embedder's hooks.
+    fn wait_parking_with(
+        &self,
+        key: u64,
+        validate: impl FnOnce() -> bool,
+        deadline: Option<WaitDeadline>,
+        waiter: &mut Waiter,
+        mut park: impl FnMut(Duration) -> Park,
     ) -> WaitResult {
         let mut inner = self
             .inner
@@ -204,35 +223,47 @@ impl ParkingSpot {
             //
             // To handle spurious wakeups if the thread wakes up but a
             // notification wasn't received then the thread goes back to sleep.
-            let timed_out = loop {
+            //
+            // A park the embedder cancelled ends the wait with `Cancelled`,
+            // never `Ok`: the thread is unwinding and must run no more guest
+            // code. Whether a `notify` got there first is settled under the
+            // lock taken back above. If one did, it dequeued this waiter and
+            // counted it, which stands: the waiter was woken, and the
+            // cancellation ends it before its next instruction. If none did,
+            // the waiter is still queued and is removed below, so no later
+            // `notify` can count a waiter that will never wake.
+            let result = loop {
                 let Some(timeout) = timeout_before_deadline(deadline) else {
-                    break true;
+                    break WaitResult::TimedOut;
                 };
 
                 drop(inner);
-                park_current_thread(timeout);
+                let parked = park(timeout);
                 inner = self
                     .inner
                     .lock()
                     .expect("failed to lock inner parking table");
 
+                if parked == Park::Cancelled {
+                    break WaitResult::Cancelled;
+                }
                 if ptr.as_ref().notified {
-                    break false;
+                    break WaitResult::Ok;
                 }
             };
 
-            if timed_out {
-                // If this thread timed out then it is still present in the
-                // waiter queue, so remove it.
-                inner.get_mut(&key).unwrap().remove(ptr);
-                WaitResult::TimedOut
-            } else {
+            if ptr.as_ref().notified {
                 // If this node was notified then we should not be in a queue
                 // at this point.
                 assert!(ptr.as_ref().next.is_none());
                 assert!(ptr.as_ref().prev.is_none());
-                WaitResult::Ok
+            } else {
+                // If this thread timed out or was cancelled before a
+                // notification reached it then it is still present in the
+                // waiter queue, so remove it.
+                inner.get_mut(&key).unwrap().remove(ptr);
             }
+            result
         }
     }
 
@@ -410,17 +441,31 @@ fn monotonic_nanos() -> u64 {
     unsafe { wasmtime_monotonic_nanos() }
 }
 
+/// How one park of the waiting thread ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Park {
+    /// The park returned for an unpark, its timeout, or neither; the wait loop
+    /// re-checks its notification and deadline.
+    Woken,
+    /// The embedder cancelled the wait: the waiter must leave the queue and
+    /// return without blocking again.
+    Cancelled,
+}
+
 #[cfg(feature = "std")]
-fn park_current_thread(timeout: Duration) {
+fn park_current_thread(timeout: Duration) -> Park {
     thread::park_timeout(timeout);
+    Park::Woken
 }
 
 #[cfg(not(feature = "std"))]
-fn park_current_thread(timeout: Duration) {
+fn park_current_thread(timeout: Duration) -> Park {
     let nanos = timeout.as_nanos();
     let nanos = u64::try_from(nanos).unwrap_or(u64::MAX);
-    unsafe {
-        wasmtime_parking_wait(nanos);
+    if unsafe { wasmtime_parking_wait(nanos) } {
+        Park::Cancelled
+    } else {
+        Park::Woken
     }
 }
 
@@ -430,7 +475,12 @@ unsafe extern "C" {
     /// `timeout_nanos` nanoseconds pass; `u64::MAX` means no timeout. It may
     /// also return for neither reason: the wait loop re-checks its own
     /// notification and deadline after every return.
-    fn wasmtime_parking_wait(timeout_nanos: u64);
+    ///
+    /// Returns `true` when the embedder cancelled the wait, the waiting
+    /// thread having to unwind instead of blocking again; the wait then
+    /// returns `WaitResult::Cancelled` whether or not a notify reached the
+    /// waiter first. Every other return is `false`.
+    fn wasmtime_parking_wait(timeout_nanos: u64) -> bool;
     /// Wakes the threads blocked in `wasmtime_parking_wait`. Called with the
     /// parking table's lock held, once for every waiter that was notified.
     fn wasmtime_parking_unpark();
@@ -445,7 +495,7 @@ unsafe extern "C" {
 
 #[cfg(test)]
 mod tests {
-    use super::{MonotonicDeadline, ParkingSpot, Waiter, deadline_after};
+    use super::{MonotonicDeadline, Park, ParkingSpot, Waiter, deadline_after};
     use crate::prelude::*;
     use crate::runtime::vm::WaitResult;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -807,5 +857,94 @@ mod tests {
                 thread.join().unwrap();
             }
         });
+    }
+    /// A park the embedder cancels ends the wait with `Cancelled` and takes
+    /// the waiter out of the queue, so a later notify counts nobody.
+    #[test]
+    fn a_cancelled_park_dequeues_the_waiter() {
+        let parking_spot = ParkingSpot::default();
+        let atomic = AtomicU64::new(0);
+        let key = atomic.as_ptr() as u64;
+        let mut waiter = Waiter::new();
+        let mut parks = 0;
+
+        let result = parking_spot.wait_parking_with(
+            key,
+            || true,
+            None,
+            &mut waiter,
+            |_| {
+                parks += 1;
+                let mut queued = 0;
+                parking_spot.with_lot(&atomic, |spot| queued = spot.num_parked());
+                assert_eq!(queued, 1, "the waiter is queued while it is parked");
+                Park::Cancelled
+            },
+        );
+
+        assert_eq!(result, WaitResult::Cancelled);
+        assert_eq!(parks, 1, "a cancelled wait does not park again");
+        let mut queued = u32::MAX;
+        parking_spot.with_lot(&atomic, |spot| queued = spot.num_parked());
+        assert_eq!(queued, 0);
+        assert_eq!(parking_spot.notify(&atomic, u32::MAX), 0);
+    }
+
+    /// A notify that dequeues the waiter before its cancelled park takes the
+    /// lock back keeps its count, and the wait still ends `Cancelled`: the
+    /// waiter was woken, then cancelled before it ran again, and it is not
+    /// left in the queue for another notify to count.
+    #[test]
+    fn a_notify_that_races_a_cancel_keeps_its_count() {
+        let parking_spot = ParkingSpot::default();
+        let atomic = AtomicU64::new(0);
+        let key = atomic.as_ptr() as u64;
+        let mut waiter = Waiter::new();
+        let mut counted = 0;
+
+        let result = parking_spot.wait_parking_with(
+            key,
+            || true,
+            None,
+            &mut waiter,
+            |_| {
+                counted = parking_spot.notify(&atomic, 1);
+                Park::Cancelled
+            },
+        );
+
+        assert_eq!(counted, 1);
+        assert_eq!(result, WaitResult::Cancelled);
+        assert_eq!(parking_spot.notify(&atomic, u32::MAX), 0);
+    }
+
+    /// A park that returns for neither a notify nor a cancel parks again,
+    /// and a cancel on a later pass still ends the wait.
+    #[test]
+    fn a_wake_without_notify_parks_again_until_cancelled() {
+        let parking_spot = ParkingSpot::default();
+        let atomic = AtomicU64::new(0);
+        let key = atomic.as_ptr() as u64;
+        let mut waiter = Waiter::new();
+        let mut parks = 0;
+
+        let result = parking_spot.wait_parking_with(
+            key,
+            || true,
+            None,
+            &mut waiter,
+            |_| {
+                parks += 1;
+                if parks < 3 {
+                    Park::Woken
+                } else {
+                    Park::Cancelled
+                }
+            },
+        );
+
+        assert_eq!(result, WaitResult::Cancelled);
+        assert_eq!(parks, 3);
+        assert_eq!(parking_spot.notify(&atomic, u32::MAX), 0);
     }
 }
