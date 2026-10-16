@@ -638,6 +638,7 @@ impl ABIMachineSpec for Riscv64MachineDeps {
     fn compute_frame_layout(
         call_conv: isa::CallConv,
         flags: &settings::Flags,
+        isa_flags: &Self::F,
         _sig: &Signature,
         regs: &[Writable<RealReg>],
         function_calls: FunctionCalls,
@@ -647,8 +648,15 @@ impl ABIMachineSpec for Riscv64MachineDeps {
         fixed_frame_storage_size: u32,
         outgoing_args_size: u32,
     ) -> FrameLayout {
+        // `preserve_all` saves every register the body writes, a call's
+        // clobbers included — except the vector registers on a target
+        // without the V extension: they do not exist there, no code on the
+        // hart can hold a value in one, and the save itself (a `vse8.v`
+        // behind a `vsetivli`) would be an illegal instruction.
         let is_callee_saved = |reg: &Writable<RealReg>| match call_conv {
-            isa::CallConv::PreserveAll => true,
+            isa::CallConv::PreserveAll => {
+                reg.to_reg().class() != RegClass::Vector || isa_flags.has_v()
+            }
             _ => DEFAULT_CALLEE_SAVES.contains(reg.to_reg().into()),
         };
         let mut regs: Vec<Writable<RealReg>> =
