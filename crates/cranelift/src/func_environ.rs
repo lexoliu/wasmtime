@@ -58,6 +58,7 @@ pub(crate) struct BuiltinFunctions {
     types: BuiltinFunctionSignatures,
 
     builtins: [Option<ir::FuncRef>; BuiltinFunctionIndex::len() as usize],
+    preserve_all_builtins: [Option<ir::FuncRef>; BuiltinFunctionIndex::len() as usize],
     breakpoint_trampoline: Option<ir::FuncRef>,
 }
 
@@ -66,6 +67,7 @@ impl BuiltinFunctions {
         Self {
             types: BuiltinFunctionSignatures::new(compiler),
             builtins: [None; BuiltinFunctionIndex::len() as usize],
+            preserve_all_builtins: [None; BuiltinFunctionIndex::len() as usize],
             breakpoint_trampoline: None,
         }
     }
@@ -81,6 +83,39 @@ impl BuiltinFunctions {
         }
         let signature = func.import_signature(self.types.wasm_signature(builtin));
         let key = FuncKey::WasmToBuiltinTrampoline(builtin);
+        let (namespace, index) = key.into_raw_parts();
+        let name = ir::ExternalName::User(
+            func.declare_imported_user_function(ir::UserExternalName { namespace, index }),
+        );
+        let f = func.import_function(ir::ExtFuncData {
+            name,
+            signature,
+            colocated: true,
+            patchable: false,
+        });
+        *cache = Some(f);
+        f
+    }
+
+    /// Imports `builtin` through its `preserve_all` trampoline: an ordinary
+    /// call that clobbers no register, for a cold path whose call must not
+    /// shape register allocation of the code around it. The trampoline
+    /// raises the builtin's trap itself, so the call returns nothing.
+    pub(crate) fn load_preserve_all_builtin(
+        &mut self,
+        func: &mut Function,
+        builtin: BuiltinFunctionIndex,
+    ) -> ir::FuncRef {
+        let cache = &mut self.preserve_all_builtins[builtin.index() as usize];
+        if let Some(f) = cache {
+            return *f;
+        }
+        // The trampoline's own signature: see `compile_wasm_to_builtin`.
+        let mut signature = self.types.wasm_signature(builtin);
+        signature.returns.clear();
+        signature.call_conv = CallConv::PreserveAll;
+        let signature = func.import_signature(signature);
+        let key = FuncKey::PatchableToBuiltinTrampoline(builtin);
         let (namespace, index) = key.into_raw_parts();
         let name = ir::ExternalName::User(
             func.declare_imported_user_function(ir::UserExternalName { namespace, index }),
@@ -811,7 +846,15 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         builder.seal_block(interrupt_block);
 
         builder.switch_to_block(interrupt_block);
-        let stack_limit_interrupt = self.builtin_functions.stack_limit_interrupt(builder.func);
+        // Through the `preserve_all` trampoline: with the ordinary wasm
+        // calling convention this cold call would clobber every
+        // caller-saved register, forcing each value live across the check
+        // (a function's parameters at entry, every loop-carried value at a
+        // loop header) into a callee-saved register or a spill slot on the
+        // hot path.
+        let stack_limit_interrupt = self
+            .builtin_functions
+            .load_preserve_all_builtin(builder.func, BuiltinFunctionIndex::stack_limit_interrupt());
         let vmctx = self.vmctx_val(&mut builder.cursor());
         builder.ins().call(stack_limit_interrupt, &[vmctx, sp]);
         builder.ins().jump(continuation_block, &[]);
