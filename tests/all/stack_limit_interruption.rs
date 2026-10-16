@@ -443,3 +443,69 @@ fn precompiled_code_must_agree_on_the_knob() -> Result<()> {
     );
     Ok(())
 }
+
+/// A loop that keeps integer and floating-point values live across both
+/// kinds of interruption check: its own loop header, and the entry of
+/// `$step`, which calls wasm and so carries the resumable entry check, with
+/// its parameters live across it.
+const LIVE_ACROSS_CHECKS: &str = r#"
+    (module
+        (func $trunc (param f64) (result i64)
+            (i64.trunc_f64_s (local.get 0)))
+        (func $step (param i64 f64) (result i64)
+            (i64.add (local.get 0) (call $trunc (local.get 1))))
+        (func (export "run") (param $n i32) (result i64 f64 f64 i64)
+            (local $i i64) (local $acc i64) (local $x f64) (local $y f64) (local $mix i64)
+            (local.set $x (f64.const 0.5))
+            (local.set $y (f64.const 3.25))
+            (loop $l
+                (local.set $acc
+                    (call $step
+                        (i64.add (local.get $acc) (local.get $i))
+                        (local.get $y)))
+                (local.set $x (f64.add (f64.mul (local.get $x) (f64.const 1.0001)) (f64.const 0.25)))
+                (local.set $y (f64.sub (local.get $y) (f64.const 0.001)))
+                (local.set $mix (i64.xor (i64.rotl (local.get $mix) (i64.const 7)) (local.get $acc)))
+                (local.set $i (i64.add (local.get $i) (i64.const 1)))
+                (br_if $l (i64.lt_u (local.get $i) (i64.extend_i32_u (local.get $n)))))
+            (local.get $acc) (local.get $x) (local.get $y) (local.get $mix)))
+"#;
+
+#[wasmtime_test(strategies(not(CraneliftPulley)))]
+fn values_live_across_an_interrupted_check_survive(config: &mut Config) -> Result<()> {
+    let engine = build_engine(config)?;
+    let module = Module::new(&engine, LIVE_ACROSS_CHECKS)?;
+    let mut store = Store::new(&engine, Interrupts::default());
+    let handle = store.interrupt_handle()?;
+    store.interrupt_callback(move |mut cx| {
+        cx.data_mut().delivered += 1;
+        // Host floating-point work between the check and the resume, so a
+        // register the guest kept live across the check is overwritten
+        // unless the check's call preserves it.
+        let scrambled = std::hint::black_box(f64::from(cx.data().delivered)).sqrt() * 1.5;
+        std::hint::black_box(scrambled);
+        if cx.data().rearm {
+            handle.interrupt();
+        }
+        Ok(InterruptAction::Continue)
+    });
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let run = instance.get_typed_func::<i32, (i64, f64, f64, i64)>(&mut store, "run")?;
+
+    let quiet = run.call(&mut store, 1000)?;
+    assert_eq!(store.data().delivered, 0);
+
+    // Every delivery re-arms, so every check from here on fails and calls
+    // into the runtime: at `run`'s entry, then at least twice per iteration
+    // (Winch also checks the entry of the call-free `$trunc`).
+    store.data_mut().rearm = true;
+    store.interrupt_handle()?.interrupt();
+    let interrupted = run.call(&mut store, 1000)?;
+    store.data_mut().rearm = false;
+    assert!(store.data().delivered >= 2001, "{}", store.data().delivered);
+    assert_eq!(interrupted.0, quiet.0);
+    assert_eq!(interrupted.1.to_bits(), quiet.1.to_bits());
+    assert_eq!(interrupted.2.to_bits(), quiet.2.to_bits());
+    assert_eq!(interrupted.3, quiet.3);
+    Ok(())
+}
