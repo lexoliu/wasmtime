@@ -12,7 +12,7 @@ use core::slice;
 use core::time::Duration;
 use wasmtime_environ::DefinedMemoryIndex;
 
-pub use crate::runtime::vm::WaitResult;
+pub use crate::runtime::vm::{AtomicWaitCancelled, WaitResult};
 
 /// Error for out of bounds [`Memory`] access.
 #[derive(Debug)]
@@ -1024,6 +1024,9 @@ impl SharedMemory {
     ///   returned.
     /// * `WaitResult::TimedOut` - all the steps of `Ok` happened, except this
     ///   thread was woken up due to a timeout.
+    /// * `WaitResult::Cancelled` - on `no_std`, the embedder's
+    ///   `wasmtime_parking_wait` cancelled the wait while this thread was
+    ///   parked, and the thread must unwind rather than run on.
     ///
     /// This function will not return due to spurious wakeups.
     ///

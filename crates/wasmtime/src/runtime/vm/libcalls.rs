@@ -646,13 +646,15 @@ fn memory_atomic_wait32(
     addr_index: u64,
     expected: u32,
     timeout: u64,
-) -> Result<u32, Trap> {
+) -> Result<u32> {
     let timeout = (timeout as i64 >= 0).then(|| Duration::from_nanos(timeout));
     let memory = DefinedMemoryIndex::from_u32(memory_index);
-    Ok(store
-        .instance_mut(instance)
-        .get_defined_memory_mut(memory)
-        .atomic_wait32(addr_index, expected, timeout)? as u32)
+    atomic_wait_result(
+        store
+            .instance_mut(instance)
+            .get_defined_memory_mut(memory)
+            .atomic_wait32(addr_index, expected, timeout)?,
+    )
 }
 
 // Implementation of `memory.atomic.wait64` for locally defined memories.
@@ -664,13 +666,25 @@ fn memory_atomic_wait64(
     addr_index: u64,
     expected: u64,
     timeout: u64,
-) -> Result<u32, Trap> {
+) -> Result<u32> {
     let timeout = (timeout as i64 >= 0).then(|| Duration::from_nanos(timeout));
     let memory = DefinedMemoryIndex::from_u32(memory_index);
-    Ok(store
-        .instance_mut(instance)
-        .get_defined_memory_mut(memory)
-        .atomic_wait64(addr_index, expected, timeout)? as u32)
+    atomic_wait_result(
+        store
+            .instance_mut(instance)
+            .get_defined_memory_mut(memory)
+            .atomic_wait64(addr_index, expected, timeout)?,
+    )
+}
+
+/// The value a `memory.atomic.wait` instruction returns to wasm, or the trap
+/// that unwinds a wait the embedder cancelled.
+#[cfg(feature = "threads")]
+fn atomic_wait_result(result: crate::WaitResult) -> Result<u32> {
+    match result {
+        crate::WaitResult::Cancelled => Err(Error::new(crate::AtomicWaitCancelled)),
+        result => Ok(result as u32),
+    }
 }
 
 // Hook for when an instance runs out of fuel.
