@@ -2693,6 +2693,14 @@
 (rule (lower (return args))
       (lower_return args))
 
+;;; Rules for `load_processor_local` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; The processor's local block is the one `tp` addresses: one `ld` off it.
+(rule (lower (load_processor_local $I64 (offset32 offset)))
+  (gen_load (gen_reg_offset_amode (tp_reg) offset)
+            (LoadOP.Ld)
+            (mem_flags_trusted_data)))
+
 ;;; Rules for `get_{frame,stack}_pointer` and `get_return_address` ;;;;;;;;;;;;;
 
 (rule (lower (get_frame_pointer _))

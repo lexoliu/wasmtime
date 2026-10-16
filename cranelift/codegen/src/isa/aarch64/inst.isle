@@ -185,6 +185,13 @@
         (rd PReg)
         (rm Reg))
 
+       ;; Loads the 64-bit word at `offset` in the processor's local block,
+       ;; which `tpidr_el1` addresses: `mrs rd, tpidr_el1` then
+       ;; `ldr rd, [rd, #offset]` (for `load_processor_local`).
+       (LoadProcessorLocal
+        (rd WritableReg)
+        (offset i32))
+
        ;; A MOV[Z,N] with a 16-bit immediate.
        (MovWide
         (op MoveWideOp)
@@ -4423,6 +4430,13 @@
       (let ((dst WritableReg (temp_writable_reg $I64))
             (scratch WritableReg (temp_writable_reg $I64))
             (_ Unit (emit (MInst.AtomicCASLoop ty flags addr expect replace dst scratch))))
+        dst))
+
+;; Helper for emitting `MInst.LoadProcessorLocal` instructions.
+(decl a64_load_processor_local (i32) Reg)
+(rule (a64_load_processor_local offset)
+      (let ((dst WritableReg (temp_writable_reg $I64))
+            (_ Unit (emit (MInst.LoadProcessorLocal dst offset))))
         dst))
 
 ;; Helper for emitting `MInst.MovPReg` instructions.

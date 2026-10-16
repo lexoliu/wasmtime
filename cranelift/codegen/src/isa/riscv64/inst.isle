@@ -3190,6 +3190,10 @@
 (decl sp_reg () PReg)
 (extern constructor sp_reg sp_reg)
 
+;; The thread pointer, which a kernel points at the processor's local block.
+(decl tp_reg () PReg)
+(extern constructor tp_reg tp_reg)
+
 ;; Extractor that matches all registers, except the zero register
 (decl non_zero_reg () XReg)
 (extern extractor non_zero_reg is_non_zero_reg)

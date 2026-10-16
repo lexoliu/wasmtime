@@ -14,13 +14,12 @@
 ;;       pushq   %rbp
 ;;       movq    %rsp, %rbp
 ;;       subq    $0x30, %rsp
-;;       movq    %r14, 0x20(%rsp)
+;;       movq    %r13, 0x20(%rsp)
 ;;       movq    8(%rdi), %rax
-;;       movq    0x18(%rax), %rax
 ;;       movq    %rsp, %rcx
-;;       cmpq    %rax, %rcx
-;;       jb      0x93
-;;   21: movq    %rdi, (%rsp)
+;;       cmpq    0x18(%rax), %rcx
+;;       jb      0x90
+;;   1e: movq    %rdi, (%rsp)
 ;;       nopl    (%rax, %rax)
 ;;       ├─╼ debug frame state (after previous inst): func key DefinedWasmFunction(StaticModuleIndex(0), DefinedFuncIndex(0)), wasm PC 0x1f, slot at FP-0x30, locals , stack 
 ;;       ╰─╼ breakpoint patch: wasm PC 0x1f, patch bytes [232, 254, 1, 0, 0]
@@ -52,15 +51,15 @@
 ;;       xorl    %eax, %eax
 ;;       movl    $0, 8(%rsp)
 ;;       movl    %ecx, 0xc(%rsp)
-;;       movq    0x20(%rsp), %r14
+;;       movq    0x20(%rsp), %r13
 ;;       addq    $0x30, %rsp
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   93: movq    %rdi, %r14
-;;   96: xorl    %esi, %esi
-;;   98: callq   0x1ca
-;;   9d: movq    %r14, %rdi
-;;   a0: callq   0x1fb
+;;   90: movq    %rdi, %r13
+;;   93: xorl    %esi, %esi
+;;   95: callq   0x1c7
+;;   9a: movq    %r13, %rdi
+;;   9d: callq   0x1f8
 ;;       ╰─╼ debug frame state (after previous inst): func key DefinedWasmFunction(StaticModuleIndex(0), DefinedFuncIndex(0)), wasm PC 0x1e, slot at FP-0x30, locals , stack 
-;;   a5: ud2
+;;   a2: ud2

@@ -750,7 +750,8 @@ impl<'a> Verifier<'a> {
             | Store { .. }
             | Trap { .. }
             | CondTrap { .. }
-            | NullAry { .. } => {}
+            | NullAry { .. }
+            | LoadProcessorLocal { .. } => {}
         }
 
         Ok(())

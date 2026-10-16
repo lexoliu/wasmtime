@@ -613,6 +613,10 @@ impl generated_code::Context for RV64IsleContext<'_, '_, MInst, Riscv64Backend> 
         px_reg(2)
     }
 
+    fn tp_reg(&mut self) -> PReg {
+        px_reg(4)
+    }
+
     #[inline]
     fn int_compare(&mut self, kind: &IntCC, rs1: XReg, rs2: XReg) -> IntegerCompare {
         IntegerCompare {

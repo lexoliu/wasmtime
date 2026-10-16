@@ -296,6 +296,31 @@ pub(crate) fn emit(
             asm::inst::movq_mr::new(*dst, Gpr::unwrap_new(src)).emit(sink, info, state);
         }
 
+        Inst::LoadProcessorLocal { dst, offset } => {
+            // mov dst, qword ptr fs:[offset]: the FS segment override, a
+            // REX.W `mov r64, r/m64` and a SIB byte with neither base nor
+            // index, so the address is the 32-bit displacement alone.
+            let dst = dst.to_reg().to_reg();
+            let enc = dst.to_real_reg().unwrap().hw_enc();
+            sink.put1(0x64);
+            sink.put1(0x48 | ((enc >> 3) << 2));
+            sink.put1(0x8b);
+            sink.put1(((enc & 7) << 3) | 0b100);
+            sink.put1(0x25);
+            sink.put4(offset.cast_unsigned());
+        }
+
+        Inst::CmpSpProcessorLocal { offset } => {
+            // cmp rsp, qword ptr fs:[offset]: `cmp r64, r/m64` with `rsp`
+            // in the ModRM reg field and the same base-less SIB address.
+            sink.put1(0x64);
+            sink.put1(0x48);
+            sink.put1(0x3b);
+            sink.put1((regs::rsp().to_real_reg().unwrap().hw_enc() << 3) | 0b100);
+            sink.put1(0x25);
+            sink.put4(offset.cast_unsigned());
+        }
+
         Inst::MovToPReg { src, dst } => {
             let dst: Reg = (*dst).into();
             debug_assert!([regs::rsp(), regs::rbp(), regs::pinned_reg()].contains(&dst));

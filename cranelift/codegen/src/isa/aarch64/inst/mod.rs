@@ -428,6 +428,7 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_def(rd);
             collector.reg_fixed_nonallocatable(*rm);
         }
+        Inst::LoadProcessorLocal { rd, .. } => collector.reg_def(rd),
         Inst::MovToPReg { rd, rm } => {
             debug_assert!(rm.is_virtual());
             collector.reg_fixed_nonallocatable(*rd);
@@ -1470,6 +1471,10 @@ impl Inst {
                 let rd = pretty_print_ireg(rd.to_reg(), OperandSize::Size64);
                 let rm = show_ireg_sized(rm.into(), OperandSize::Size64);
                 format!("mov {rd}, {rm}")
+            }
+            &Inst::LoadProcessorLocal { rd, offset } => {
+                let rd = pretty_print_ireg(rd.to_reg(), OperandSize::Size64);
+                format!("mrs {rd}, tpidr_el1 ; ldr {rd}, [{rd}, #{offset}]")
             }
             &Inst::MovToPReg { rd, rm } => {
                 let rd = show_ireg_sized(rd.into(), OperandSize::Size64);

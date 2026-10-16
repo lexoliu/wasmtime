@@ -92,6 +92,8 @@ impl Inst {
             | Inst::LoadExtName { .. }
             | Inst::MovFromPReg { .. }
             | Inst::MovToPReg { .. }
+            | Inst::LoadProcessorLocal { .. }
+            | Inst::CmpSpProcessorLocal { .. }
             | Inst::StackProbeLoop { .. }
             | Inst::Args { .. }
             | Inst::Rets { .. }
@@ -532,6 +534,17 @@ impl PrettyPrint for Inst {
                 format!("{op} {src}, {dst}")
             }
 
+            Inst::LoadProcessorLocal { dst, offset } => {
+                let dst = pretty_print_reg(dst.to_reg().to_reg(), 8);
+                let op = ljustify("movq".to_string());
+                format!("{op} %fs:{offset}, {dst}")
+            }
+
+            Inst::CmpSpProcessorLocal { offset } => {
+                let op = ljustify("cmpq".to_string());
+                format!("{op} %fs:{offset}, %rsp")
+            }
+
             Inst::MovToPReg { src, dst } => {
                 let src = pretty_print_reg(src.to_reg(), 8);
                 let dst: Reg = (*dst).into();
@@ -909,6 +922,8 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_fixed_nonallocatable(*src);
             collector.reg_def(dst);
         }
+        Inst::LoadProcessorLocal { dst, .. } => collector.reg_def(dst),
+        Inst::CmpSpProcessorLocal { .. } => {}
         Inst::MovToPReg { dst, src } => {
             debug_assert!(src.to_reg().is_virtual());
             collector.reg_use(src);

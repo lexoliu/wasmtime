@@ -29,3 +29,10 @@
       (remat x))
 (rule (simplify x @ (f64const _ _))
       (remat x))
+
+;; The stack pointer is a register read: rematerialize it in each block that
+;; uses it rather than keeping one copy live across the function (or a loop
+;; it would be hoisted out of). Within a function body the stack pointer
+;; never moves, so every copy reads the same value.
+(rule (simplify x @ (get_stack_pointer _))
+      (remat x))
