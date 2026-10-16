@@ -100,9 +100,12 @@ define_tunables! {
         pub epoch_interruption: bool,
 
         /// Whether or not guest code is interrupted through the store's stack
-        /// limit: every function entry and loop header compares the stack
-        /// pointer with `VMStoreContext::stack_limit` and, when the compare
-        /// fails, calls a resumable builtin instead of trapping.
+        /// limit: the entry of every function that calls wasm, and every loop
+        /// header, compares the stack pointer with
+        /// `VMStoreContext::stack_limit` and, when the compare fails, calls a
+        /// resumable builtin instead of trapping. A function that calls no
+        /// wasm checks for overflow against `VMStoreContext::real_stack_limit`
+        /// instead, which an interruption never raises.
         pub stack_limit_interruption: bool,
 
         /// Whether or not linear memories are allowed to be reallocated after

@@ -1247,6 +1247,23 @@ where
         }
     }
 
+    /// Get a `Load` for the `VMStoreContext::real_stack_limit` field: the
+    /// limit the store's owner configured, which never holds the
+    /// stack-limit interruption sentinel.
+    pub fn vmstore_context_real_stack_limit_load(&mut self, func: &mut ir::Function) -> Load {
+        let offset = self
+            .offsets
+            .get_ptr_size()
+            .vmstore_context_real_stack_limit()
+            .into();
+        let region = self.vmstore_context_region(func, offset);
+        Load {
+            offset,
+            flags: ir::MemFlagsData::trusted().with_alias_region(Some(region)),
+            ty: self.pointer_type,
+        }
+    }
+
     /// Load the `VMStoreContext::stack_limit` field.
     pub fn vmstore_context_stack_limit(
         &mut self,
