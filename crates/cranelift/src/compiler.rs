@@ -42,8 +42,8 @@ use wasmtime_environ::{
     DefinedFuncIndex, FlagValue, FrameInstPos, FrameStackShape, FrameStateSlotBuilder,
     FrameTableBuilder, FuncKey, FunctionBodyData, FunctionLoc, GetPtrSize, HostCall,
     InliningCompiler, ModulePC, ModuleStartup, ModuleTranslation, ModuleTypesBuilder,
-    StackMapSection, StaticModuleIndex, TrapEncodingBuilder, TrapSentinel, TripleExt, Tunables,
-    WasmError, WasmFuncType, WasmValType, prelude::*,
+    StackLimitLocation, StackMapSection, StaticModuleIndex, TrapEncodingBuilder, TrapSentinel,
+    TripleExt, Tunables, WasmError, WasmFuncType, WasmValType, prelude::*,
 };
 use wasmtime_unwinder::ExceptionTableBuilder;
 
@@ -603,7 +603,12 @@ impl wasmtime_environ::Compiler for Compiler {
             };
             let stack_limit = VmctxLoadChain::new([store_ctx, stack_limit].into());
             func_env.stack_limit_at_function_entry = if interruptible_entry {
-                Some(EntryStackCheck::Interruptible(stack_limit))
+                Some(match self.tunables.stack_limit_location {
+                    StackLimitLocation::StoreContext => EntryStackCheck::Interruptible(stack_limit),
+                    StackLimitLocation::PerProcessor { offset } => {
+                        EntryStackCheck::InterruptibleProcessorLocal { offset }
+                    }
+                })
             } else if self.tunables.signals_based_traps {
                 let stack_limit = stack_limit.emit_global(&mut context.func);
                 context.func.stack_limit = Some(stack_limit);

@@ -332,6 +332,15 @@ impl Assembler {
         }
     }
 
+    /// Load the word `offset` bytes past the `tpidr_el1` base:
+    /// `mrs rd, tpidr_el1; ldr rd, [rd, #offset]`.
+    pub fn load_processor_local(&mut self, offset: i32, rd: WritableReg) {
+        self.emit(Inst::LoadProcessorLocal {
+            rd: rd.map(Into::into),
+            offset,
+        });
+    }
+
     /// Register to register move.
     pub fn mov_rr(&mut self, rm: Reg, rd: WritableReg, size: OperandSize) {
         let writable_rd = rd.map(Into::into);

@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/ucontext.h>
@@ -164,6 +165,11 @@ uint8_t *wasmtime_tls_get(size_t slot) { return WASMTIME_TLS[slot]; }
 void wasmtime_tls_set(size_t slot, uint8_t *val) { WASMTIME_TLS[slot] = val; }
 
 #endif
+
+// This embedding keeps the stack limit in the store context and never
+// configures `StackLimitLocation::PerProcessor`, so Wasmtime never asks for a
+// processor's stack-limit word.
+uintptr_t *wasmtime_processor_stack_limit(void) { abort(); }
 
 #ifdef WASMTIME_CUSTOM_SYNC
 

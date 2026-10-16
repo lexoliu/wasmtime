@@ -1580,7 +1580,7 @@ impl EntryStoreContext {
             let prev_stack = store
                 .0
                 .vm_store_context()
-                .replace_stack_limit(wasm_stack_limit);
+                .enter_stack_limit(wasm_stack_limit);
             stack_limit = Some(prev_stack);
         }
 
@@ -1614,7 +1614,7 @@ impl EntryStoreContext {
     fn exit_wasm(&mut self) {
         unsafe {
             if let Some(limit) = self.stack_limit {
-                (*self.vm_store_context).replace_stack_limit(limit);
+                (*self.vm_store_context).leave_stack_limit(limit);
             }
 
             *(*self.vm_store_context).last_wasm_exit_trampoline_fp.get() =

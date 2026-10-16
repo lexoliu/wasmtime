@@ -613,6 +613,17 @@ impl WasmtimeOptionValue for wasmtime::Inlining {
     }
 }
 
+impl WasmtimeOptionValue for wasmtime::StackLimitLocation {
+    const VAL_HELP: &'static str = "=store|processor:<offset>";
+    fn parse(val: Option<&str>) -> Result<Self> {
+        String::parse(val)?.parse()
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
 impl WasmtimeOptionValue for WasiNnGraph {
     const VAL_HELP: &'static str = "=<format>::<dir>";
     fn parse(val: Option<&str>) -> Result<Self> {

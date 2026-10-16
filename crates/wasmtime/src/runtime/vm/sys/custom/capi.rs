@@ -189,6 +189,18 @@ unsafe extern "C" {
     /// Setter for the TLS space described in `wasmtime_tls_get`.
     pub fn wasmtime_tls_set(slot: usize, ptr: *mut u8);
 
+    /// Returns the address of the executing processor's stack-limit word, for
+    /// an engine configured with `StackLimitLocation::PerProcessor { offset }`.
+    ///
+    /// Compiled code reads the word at `offset` bytes past the base the
+    /// target's thread pointer holds (`fs` on x86-64, `tpidr_el1` on AArch64,
+    /// `tp` on RISC-V 64), so this must return exactly that address on
+    /// whichever processor calls it, and the word must stay valid for as long
+    /// as the processor runs wasm. Wasmtime accesses the word only with
+    /// pointer-sized atomics. It is called only by engines configured that
+    /// way; an embedding that never configures it may abort here.
+    pub fn wasmtime_processor_stack_limit() -> *mut usize;
+
     /// Frees a synchronization lock.
     ///
     /// May be called on a lock that was never used (still has a zero pattern).

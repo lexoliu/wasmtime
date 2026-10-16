@@ -40,6 +40,13 @@ pub fn tls_set(ptr: *mut u8) {
     unsafe { capi::wasmtime_tls_set(0, ptr) }
 }
 
+/// The executing processor's stack-limit word, for
+/// `StackLimitLocation::PerProcessor`.
+#[inline]
+pub fn processor_stack_limit() -> *mut usize {
+    unsafe { capi::wasmtime_processor_stack_limit() }
+}
+
 #[inline]
 #[cfg(feature = "component-model-async")]
 pub fn component_async_tls_get() -> *mut u8 {

@@ -34,7 +34,9 @@ use object::{
     read::elf::{ElfFile64, FileHeader, SectionHeader},
 };
 use serde_derive::{Deserialize, Serialize};
-use wasmtime_environ::{FlagValue, ObjectKind, OperatorCostStrategy, Tunables, obj};
+use wasmtime_environ::{
+    FlagValue, ObjectKind, OperatorCostStrategy, StackLimitLocation, Tunables, obj,
+};
 
 const VERSION: u8 = 0;
 
@@ -304,6 +306,7 @@ impl Metadata<'_> {
             ref operator_cost,
             epoch_interruption,
             stack_limit_interruption,
+            stack_limit_location,
             memory_may_move,
             guard_before_linear_memory,
             table_lazy_init,
@@ -386,6 +389,7 @@ impl Metadata<'_> {
             other.stack_limit_interruption,
             "stack-limit interruption",
         )?;
+        Self::check_stack_limit_location(stack_limit_location, other.stack_limit_location)?;
         Self::check_bool(memory_may_move, other.memory_may_move, "memory may move")?;
         Self::check_bool(
             guard_before_linear_memory,
@@ -484,6 +488,29 @@ impl Metadata<'_> {
                 )
             }
         }
+    }
+
+    fn check_stack_limit_location(
+        module: StackLimitLocation,
+        host: StackLimitLocation,
+    ) -> Result<()> {
+        if module == host {
+            return Ok(());
+        }
+
+        let desc = |location| match location {
+            StackLimitLocation::StoreContext => "in the store context".to_string(),
+            StackLimitLocation::PerProcessor { offset } => {
+                format!("in the processor-local word at offset {offset}")
+            }
+        };
+
+        let module = desc(module);
+        let host = desc(host);
+
+        bail!(
+            "module was compiled to read the stack limit {module} however the host keeps it {host}"
+        )
     }
 
     fn check_inlining(

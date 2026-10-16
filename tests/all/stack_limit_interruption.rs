@@ -409,6 +409,73 @@ fn interrupt_handle_requires_the_knob() -> Result<()> {
     Ok(())
 }
 
+fn per_processor_config(offset: i32) -> Config {
+    let mut config = Config::new();
+    config.stack_limit_interruption(true);
+    config.stack_limit_location(StackLimitLocation::PerProcessor { offset });
+    config
+}
+
+#[test]
+fn a_per_processor_limit_requires_stack_limit_interruption() {
+    let mut config = Config::new();
+    config.stack_limit_location(StackLimitLocation::PerProcessor { offset: 16 });
+    let error = Engine::new(&config).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "`stack_limit_location(StackLimitLocation::PerProcessor { .. })` requires \
+         `stack_limit_interruption`"
+    );
+}
+
+#[test]
+fn a_per_processor_limit_refuses_a_target_without_a_thread_pointer_block() -> Result<()> {
+    let mut config = per_processor_config(16);
+    config.target("s390x-unknown-linux-gnu")?;
+    let error = Engine::new(&config).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "a per-processor stack limit is not supported on s390x-unknown-linux-gnu: only \
+         x86-64, AArch64 and RISC-V 64 address a processor-local block"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_per_processor_limit_refuses_an_unaligned_offset() {
+    let error = Engine::new(&per_processor_config(12)).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the per-processor stack limit offset 12 is not a multiple of the pointer size"
+    );
+}
+
+#[test]
+fn precompiled_code_must_agree_on_the_limit_location() -> Result<()> {
+    let per_processor = Engine::new(&per_processor_config(16))?;
+    let store_context = build_engine(&mut Config::new())?;
+
+    let compiled = per_processor.precompile_module(b"(module)")?;
+    let error = unsafe { Module::deserialize(&store_context, &compiled) }.unwrap_err();
+    assert_eq!(
+        error.root_cause().to_string(),
+        "module was compiled to read the stack limit in the processor-local word at offset 16 \
+         however the host keeps it in the store context"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_std_build_does_not_run_per_processor_code() -> Result<()> {
+    let engine = Engine::new(&per_processor_config(16))?;
+    let error = Module::new(&engine, "(module)").unwrap_err();
+    assert!(
+        format!("{error:?}").contains("a per-processor stack limit needs a custom platform"),
+        "{error:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn stack_limit_interruption_refuses_epochs() {
     let mut config = Config::new();

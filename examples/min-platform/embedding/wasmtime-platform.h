@@ -259,6 +259,20 @@ extern uint8_t *wasmtime_tls_get(uintptr_t slot);
  */
 extern void wasmtime_tls_set(uintptr_t slot, uint8_t *ptr);
 
+/**
+ * Returns the address of the executing processor's stack-limit word, for
+ * an engine configured with `StackLimitLocation::PerProcessor { offset }`.
+ *
+ * Compiled code reads the word at `offset` bytes past the base the
+ * target's thread pointer holds (`fs` on x86-64, `tpidr_el1` on AArch64,
+ * `tp` on RISC-V 64), so this must return exactly that address on
+ * whichever processor calls it, and the word must stay valid for as long
+ * as the processor runs wasm. Wasmtime accesses the word only with
+ * pointer-sized atomics. It is called only by engines configured that
+ * way; an embedding that never configures it may abort here.
+ */
+extern uintptr_t *wasmtime_processor_stack_limit(void);
+
 #if defined(WASMTIME_CUSTOM_SYNC)
 /**
  * Frees a synchronization lock.

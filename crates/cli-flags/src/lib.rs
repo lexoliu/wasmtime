@@ -355,6 +355,10 @@ wasmtime_option_group! {
         /// interruption fails the next stack-limit check, which resumes after
         /// running the store's interrupt callback.
         pub stack_limit_interruption: Option<bool>,
+        /// Where stack-limit interruption checks read the limit: `store`
+        /// (the default) or `processor:<offset>`, a word of the executing
+        /// processor's local block (a custom platform only).
+        pub stack_limit_location: Option<wasmtime::StackLimitLocation>,
         /// Maximum stack size, in bytes, that wasm is allowed to consume before a
         /// stack overflow is reported.
         pub max_wasm_stack: Option<usize>,
@@ -1010,6 +1014,9 @@ impl CommonOptions {
         if let Some(enable) = self.wasm.epoch_interruption {
             config.epoch_interruption(enable);
         }
+        if let Some(location) = self.wasm.stack_limit_location {
+            config.stack_limit_location(location);
+        }
         if let Some(enable) = self.wasm.stack_limit_interruption {
             config.stack_limit_interruption(enable);
         }
@@ -1486,6 +1493,7 @@ impl CommonOptions {
                 concurrency_support: Some(engine.get_concurrency_support()),
                 epoch_interruption: Some(engine.get_epoch_interruption()),
                 stack_limit_interruption: Some(engine.get_stack_limit_interruption()),
+                stack_limit_location: Some(engine.get_stack_limit_location()),
                 fuel: if engine.get_consume_fuel() {
                     Some(1)
                 } else {

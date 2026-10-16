@@ -35,6 +35,7 @@ pub use wasmtime_cache::{Cache, CacheConfig};
 #[cfg(all(feature = "incremental-cache", feature = "cranelift"))]
 pub use wasmtime_environ::CacheStore;
 pub use wasmtime_environ::Inlining;
+pub use wasmtime_environ::StackLimitLocation;
 
 pub(crate) const DEFAULT_WASM_BACKTRACE_MAX_FRAMES: NonZeroUsize = NonZeroUsize::new(20).unwrap();
 
@@ -812,6 +813,33 @@ impl Config {
     /// This option is disabled by default.
     pub fn stack_limit_interruption(&mut self, enable: bool) -> &mut Self {
         self.tunables.stack_limit_interruption = Some(enable);
+        self
+    }
+
+    /// Selects where the checks of [`Config::stack_limit_interruption`] find
+    /// the stack limit.
+    ///
+    /// [`StackLimitLocation::StoreContext`], the default, keeps the limit in
+    /// the store and reaches it through each function's `vmctx`.
+    ///
+    /// [`StackLimitLocation::PerProcessor`] keeps it in a word of the executing
+    /// processor's local block, which every check reads through the target's
+    /// thread pointer (`fs` on x86-64, `tpidr_el1` on AArch64, `tp` on
+    /// RISC-V 64). The runtime publishes the running store's limit into the
+    /// word whenever wasm enters, resumes, or leaves on a processor, and an
+    /// interrupt request raises the word of the processor the store is
+    /// published on. The embedder provides the block: the thread pointer
+    /// must address it whenever wasm runs, and the custom-platform hook
+    /// `wasmtime_processor_stack_limit` returns the executing processor's
+    /// word. A store's wasm must not run on two processors at once.
+    ///
+    /// [`Engine::new`](crate::Engine::new) refuses the per-processor location
+    /// unless `stack_limit_interruption` is enabled and the target is x86-64,
+    /// AArch64 or RISC-V 64. Such an engine compiles code for any host, but
+    /// only a custom-platform build (without the `std` feature), the one
+    /// that links the hook, runs it.
+    pub fn stack_limit_location(&mut self, location: StackLimitLocation) -> &mut Self {
+        self.tunables.stack_limit_location = Some(location);
         self
     }
 
@@ -2912,6 +2940,33 @@ impl Config {
             // stack limit at all, so a raised limit would never be observed.
             if self.compiler_target().is_pulley() {
                 bail!("`stack_limit_interruption` is not supported on Pulley targets");
+            }
+        }
+
+        if let StackLimitLocation::PerProcessor { offset } = tunables.stack_limit_location {
+            if !tunables.stack_limit_interruption {
+                bail!(
+                    "`stack_limit_location(StackLimitLocation::PerProcessor {{ .. }})` \
+                     requires `stack_limit_interruption`"
+                );
+            }
+            let target = self.compiler_target();
+            match target.architecture {
+                target_lexicon::Architecture::X86_64
+                | target_lexicon::Architecture::Aarch64(_)
+                | target_lexicon::Architecture::Riscv64(_) => {}
+                _ => bail!(
+                    "a per-processor stack limit is not supported on {target}: only x86-64, \
+                     AArch64 and RISC-V 64 address a processor-local block"
+                ),
+            }
+            // Every target above is 64-bit, and the runtime stores the limit
+            // with a pointer-sized atomic.
+            if offset % 8 != 0 {
+                bail!(
+                    "the per-processor stack limit offset {offset} is not a multiple of the \
+                     pointer size"
+                );
             }
         }
 
@@ -5110,6 +5165,11 @@ impl Engine {
     /// Returns the configured [`Config::stack_limit_interruption`] value.
     pub fn get_stack_limit_interruption(&self) -> bool {
         self.tunables().stack_limit_interruption
+    }
+
+    /// Returns the configured [`Config::stack_limit_location`] value.
+    pub fn get_stack_limit_location(&self) -> StackLimitLocation {
+        self.tunables().stack_limit_location
     }
 
     /// Returns the configured [`Config::consume_fuel`] value.

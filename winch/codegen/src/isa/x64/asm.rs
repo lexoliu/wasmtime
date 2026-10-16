@@ -384,6 +384,12 @@ impl Assembler {
         self.emit(Inst::External { inst });
     }
 
+    /// Load the word `offset` bytes past the `fs` base: `mov dst, fs:[offset]`.
+    pub fn load_processor_local(&mut self, offset: i32, dst: WritableReg) {
+        let dst: WritableGpr = dst.map(|r| r.into());
+        self.emit(Inst::LoadProcessorLocal { dst, offset });
+    }
+
     /// Register-to-register move.
     pub fn mov_rr(&mut self, src: Reg, dst: WritableReg, size: OperandSize) {
         let dst: WritableGpr = dst.map(|r| r.into());

@@ -403,6 +403,19 @@ impl Engine {
         if !cfg!(target_has_atomic = "64") && self.tunables().epoch_interruption {
             return Err("epochs currently require 64-bit atomics".into());
         }
+        if cfg!(any(miri, feature = "std"))
+            && matches!(
+                self.tunables().stack_limit_location,
+                wasmtime_environ::StackLimitLocation::PerProcessor { .. }
+            )
+        {
+            return Err(
+                "a per-processor stack limit needs a custom platform, which provides \
+                 `wasmtime_processor_stack_limit` -- this build of Wasmtime uses the standard \
+                 library's platform"
+                    .into(),
+            );
+        }
 
         // Double-check that the host's float ABI matches Cranelift's float ABI.
         // See `Config::x86_float_abi_ok` for some more

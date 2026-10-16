@@ -49,6 +49,20 @@ fn empty_mmap() -> SendSyncPtr<[u8]> {
     SendSyncPtr::from(empty)
 }
 
+/// The executing processor's stack-limit word, for
+/// `StackLimitLocation::PerProcessor`, which only a custom platform provides.
+///
+/// `Engine::check_compatible_with_native_host` refuses to load code for such
+/// an engine here, so this is reached only by calling a host function
+/// through a store of one.
+#[cfg(any(miri, feature = "std"))]
+pub fn processor_stack_limit() -> *mut usize {
+    panic!(
+        "a per-processor stack limit needs the custom platform's \
+         `wasmtime_processor_stack_limit`, which this platform does not provide"
+    )
+}
+
 cfg_if::cfg_if! {
     if #[cfg(miri)] {
         mod miri;

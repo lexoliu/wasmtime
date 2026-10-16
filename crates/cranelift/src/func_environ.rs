@@ -14,7 +14,7 @@ use crate::{
 };
 use cranelift_codegen::cursor::FuncCursor;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::immediates::{Ieee32, Ieee64, Imm64, V128Imm};
+use cranelift_codegen::ir::immediates::{Ieee32, Ieee64, Imm64, Offset32, V128Imm};
 use cranelift_codegen::ir::{
     self, BlockArg, Endianness, ExceptionTableData, ExceptionTableItem, types,
 };
@@ -39,10 +39,10 @@ use wasmtime_environ::{
     FactInlineIntrinsic, FrameStateSlotBuilder, FrameValType, FuncIndex, FuncKey, GlobalConstValue,
     GlobalIndex, IndexType, KnownFunc, Memory, MemoryIndex, MemoryInit, MemorySegmentOffset,
     MemoryTunables, Module, ModuleInternedTypeIndex, ModuleTranslation, ModuleTypesBuilder,
-    NUM_COMPONENT_CONTEXT_SLOTS, PassiveElemIndex, PtrSize, RuntimeDataIndex, Table, TableIndex,
-    TableInitialValue, TableSegment, TableSegmentElements, TagIndex, Tunables, TypeConvert,
-    TypeIndex, VMOffsets, WasmCompositeInnerType, WasmFuncType, WasmHeapTopType, WasmHeapType,
-    WasmRefType, WasmResult, WasmStorageType, WasmValType,
+    NUM_COMPONENT_CONTEXT_SLOTS, PassiveElemIndex, PtrSize, RuntimeDataIndex, StackLimitLocation,
+    Table, TableIndex, TableInitialValue, TableSegment, TableSegmentElements, TagIndex, Tunables,
+    TypeConvert, TypeIndex, VMOffsets, WasmCompositeInnerType, WasmFuncType, WasmHeapTopType,
+    WasmHeapType, WasmRefType, WasmResult, WasmStorageType, WasmValType,
 };
 use wasmtime_environ::{FUNCREF_INIT_BIT, FUNCREF_MASK};
 
@@ -180,14 +180,12 @@ pub(crate) enum EntryStackCheck {
     /// stack-limit interruption raises to a sentinel), then resume. The
     /// builtin delivers the interruption and traps on a real overflow.
     Interruptible(VmctxLoadChain),
-}
-
-impl EntryStackCheck {
-    fn limit(&self) -> &VmctxLoadChain {
-        match self {
-            EntryStackCheck::Trap(limit) | EntryStackCheck::Interruptible(limit) => limit,
-        }
-    }
+    /// As `Interruptible`, against the executing processor's stack-limit
+    /// word (`StackLimitLocation::PerProcessor`) instead of the store's.
+    InterruptibleProcessorLocal {
+        /// Byte offset of the word from the thread-pointer base.
+        offset: i32,
+    },
 }
 
 /// The `FuncEnvironment` implementation for use by the `ModuleEnvironment`.
@@ -814,11 +812,21 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
     /// because every check's cold path calls the builtin, and a call is a
     /// memory fence to alias analysis: the merge after each check (and the
     /// loop-header merge of the back edge) starts a new memory version.
+    ///
+    /// With `StackLimitLocation::PerProcessor` the limit is one
+    /// `load_processor_local`, which is never merged or hoisted either, and
+    /// which x86-64 folds into the compare with the stack pointer.
     fn stack_limit_interrupt_check(&mut self, builder: &mut FunctionBuilder<'_>) {
-        let vmstore_ctx = self.get_vmstore_context_ptr(builder);
-        let limit = self
-            .alias_regions
-            .vmstore_context_stack_limit(&mut builder.cursor(), vmstore_ctx);
+        let limit = match self.tunables.stack_limit_location {
+            StackLimitLocation::StoreContext => {
+                let vmstore_ctx = self.get_vmstore_context_ptr(builder);
+                self.alias_regions
+                    .vmstore_context_stack_limit(&mut builder.cursor(), vmstore_ctx)
+            }
+            StackLimitLocation::PerProcessor { offset } => builder
+                .ins()
+                .load_processor_local(self.pointer_type(), Offset32::new(offset)),
+        };
         let sp = builder.ins().get_stack_pointer(self.pointer_type());
         self.stack_limit_interrupt_branch(builder, sp, limit);
     }
@@ -5326,15 +5334,25 @@ impl FuncEnvironment<'_> {
         // If an explicit stack limit is requested, emit one here at the start
         // of the function.
         if let Some(check) = self.stack_limit_at_function_entry.take() {
-            let vmctx = self.vmctx_val(&mut builder.cursor());
-            let limit = check.limit().emit(&mut builder.cursor(), vmctx);
-            let sp = builder.ins().get_stack_pointer(self.pointer_type());
             match check {
-                EntryStackCheck::Trap(_) => {
+                EntryStackCheck::Trap(limit) => {
+                    let vmctx = self.vmctx_val(&mut builder.cursor());
+                    let limit = limit.emit(&mut builder.cursor(), vmctx);
+                    let sp = builder.ins().get_stack_pointer(self.pointer_type());
                     let overflow = builder.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
                     self.conditionally_trap(builder, overflow, ir::TrapCode::STACK_OVERFLOW);
                 }
-                EntryStackCheck::Interruptible(_) => {
+                EntryStackCheck::Interruptible(limit) => {
+                    let vmctx = self.vmctx_val(&mut builder.cursor());
+                    let limit = limit.emit(&mut builder.cursor(), vmctx);
+                    let sp = builder.ins().get_stack_pointer(self.pointer_type());
+                    self.stack_limit_interrupt_branch(builder, sp, limit);
+                }
+                EntryStackCheck::InterruptibleProcessorLocal { offset } => {
+                    let limit = builder
+                        .ins()
+                        .load_processor_local(self.pointer_type(), Offset32::new(offset));
+                    let sp = builder.ins().get_stack_pointer(self.pointer_type());
                     self.stack_limit_interrupt_branch(builder, sp, limit);
                 }
             }

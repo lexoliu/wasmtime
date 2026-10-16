@@ -108,7 +108,9 @@ use core::pin::Pin;
 use core::ptr::NonNull;
 #[cfg(any(feature = "async", feature = "gc"))]
 use core::task::Poll;
-use wasmtime_environ::{DefinedGlobalIndex, DefinedTableIndex, EntityRef, TripleExt};
+use wasmtime_environ::{
+    DefinedGlobalIndex, DefinedTableIndex, EntityRef, StackLimitLocation, TripleExt,
+};
 
 mod context;
 pub use self::context::*;
@@ -836,9 +838,13 @@ impl<T> Store<T> {
 
         let store_data =
             <NonNull<ManuallyDrop<T>>>::from(&mut inner.data_no_provenance).cast::<()>();
-        Arc::get_mut(&mut inner.inner.vm_store_context)
-            .expect("no interrupt handle exists before the store is constructed")
-            .store_data = store_data.into();
+        let vm_store_context = Arc::get_mut(&mut inner.inner.vm_store_context)
+            .expect("no interrupt handle exists before the store is constructed");
+        vm_store_context.store_data = store_data.into();
+        vm_store_context.per_processor_stack_limit = matches!(
+            engine.tunables().stack_limit_location,
+            StackLimitLocation::PerProcessor { .. }
+        );
 
         inner.traitobj = StorePtr(Some(NonNull::from(&mut *inner)));
 

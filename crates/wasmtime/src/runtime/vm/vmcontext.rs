@@ -15,7 +15,7 @@ use core::marker;
 use core::mem::{self, MaybeUninit};
 use core::ops::Range;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence};
 use wasmtime_environ::{
     BuiltinFunctionIndex, DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex,
     DefinedTagIndex, NUM_COMPONENT_CONTEXT_SLOTS, VMCONTEXT_MAGIC, VMSharedTypeIndex,
@@ -1143,8 +1143,13 @@ pub struct VMStoreContext {
     /// supported target.
     ///
     /// Host code never writes it directly: every writer goes through
-    /// [`VMStoreContext::replace_stack_limit`] or
+    /// [`VMStoreContext::enter_stack_limit`],
+    /// [`VMStoreContext::leave_stack_limit`] or
     /// [`VMStoreContext::take_interrupt`], which consult `interrupt_pending`.
+    ///
+    /// With `StackLimitLocation::PerProcessor` compiled code reads the
+    /// executing processor's word instead (see `processor_stack_limit`), and
+    /// this field is unused.
     ///
     /// For more information see `crates/cranelift/src/lib.rs`.
     pub stack_limit: AtomicUsize,
@@ -1265,6 +1270,17 @@ pub struct VMStoreContext {
     /// the `stack_limit_interrupt` builtin. Host-only; compiled code never
     /// reads it.
     pub interrupt_pending: AtomicBool,
+
+    /// Whether compiled code reads this store's limit from the executing
+    /// processor's word (`StackLimitLocation::PerProcessor`) rather than from
+    /// `stack_limit`. Fixed when the store is created. Host-only.
+    pub per_processor_stack_limit: bool,
+
+    /// The processor word this store's limit is published to while its wasm
+    /// runs, or null: the word an interrupt request raises. Only the thread
+    /// running the store writes it, interrupt requesters read it. Unused
+    /// unless `per_processor_stack_limit`. Host-only.
+    pub processor_stack_limit: AtomicPtr<usize>,
 }
 
 impl VMStoreContext {
@@ -1366,21 +1382,79 @@ impl VMStoreContext {
         unsafe { *self.real_stack_limit.get() }
     }
 
-    /// Sets the store's real stack limit and publishes it to compiled code,
-    /// returning the previous real limit.
+    /// Sets the store's real stack limit as this store's wasm starts or
+    /// resumes running on the current thread, and publishes it to compiled
+    /// code, returning the previous real limit.
     ///
-    /// Every host path that changes the limit (entering and leaving wasm,
-    /// switching fibers) goes through here, so a pending interruption
-    /// survives all of them.
-    pub(crate) fn replace_stack_limit(&self, limit: usize) -> usize {
+    /// Every host path that starts running the store's wasm (entering wasm,
+    /// resuming a fiber) goes through here, and every path that stops it
+    /// through [`VMStoreContext::leave_stack_limit`], so a pending
+    /// interruption survives all of them.
+    pub(crate) fn enter_stack_limit(&self, limit: usize) -> usize {
         // SAFETY: see `real_stack_limit`.
         let previous = unsafe { mem::replace(&mut *self.real_stack_limit.get(), limit) };
         self.publish_stack_limit();
         previous
     }
 
-    /// Writes the real limit into `stack_limit`, then re-raises the sentinel
-    /// if an interruption is pending.
+    /// Restores the store's real stack limit as this store's wasm stops
+    /// running on the current thread (leaving wasm, suspending a fiber),
+    /// returning the limit it replaces.
+    ///
+    /// With a store-context limit this publishes the restored limit, as
+    /// [`VMStoreContext::enter_stack_limit`] does. With a per-processor limit
+    /// the processor's word belongs to whichever wasm runs on it next: this
+    /// store stops claiming it, and the innermost wasm activation that
+    /// remains on this thread, if any, publishes its own store's limit there
+    /// again, since it is the wasm this processor returns to.
+    pub(crate) fn leave_stack_limit(&self, limit: usize) -> usize {
+        // SAFETY: see `real_stack_limit`.
+        let previous = unsafe { mem::replace(&mut *self.real_stack_limit.get(), limit) };
+        if self.per_processor_stack_limit {
+            // A requester that loads null from here on only sets the flag,
+            // which this store's next publish observes.
+            self.processor_stack_limit
+                .store(ptr::null_mut(), Ordering::SeqCst);
+            super::traphandlers::tls::with(|state| {
+                if let Some(state) = state {
+                    // SAFETY: a live activation's store outlives it.
+                    unsafe { state.vm_store_context.get().as_ref() }.publish_stack_limit();
+                }
+            });
+        } else {
+            self.publish_stack_limit();
+        }
+        previous
+    }
+
+    /// The word compiled code reads this store's limit from while it runs
+    /// on the current thread: `stack_limit`, or the executing processor's
+    /// word, which this records as the one interrupt requests raise.
+    fn published_stack_limit(&self) -> &AtomicUsize {
+        if !self.per_processor_stack_limit {
+            return &self.stack_limit;
+        }
+        let word = crate::runtime::vm::sys::processor_stack_limit();
+        self.processor_stack_limit.store(word, Ordering::SeqCst);
+        // SAFETY: the embedder's processor-local block, and so the word,
+        // lives as long as the processor, and every access to the word is
+        // atomic (compiled code's load is a relaxed atomic load).
+        unsafe { AtomicUsize::from_ptr(word) }
+    }
+
+    /// Writes the real limit into the word compiled code reads (`stack_limit`
+    /// or the executing processor's word), then re-raises the sentinel if an
+    /// interruption is pending.
+    ///
+    /// With a per-processor limit the word is recorded in
+    /// `processor_stack_limit` before the limit is stored, and the requester
+    /// loads that pointer after storing the flag and before storing the
+    /// sentinel. The same total order then covers the pointer: a requester
+    /// that loaded an older word stored its flag before this publish loaded
+    /// it, so the publish re-raises the sentinel itself. A requester that
+    /// read a word this store has since left raises a sentinel nobody owns:
+    /// whichever store runs on that processor fails one check, finds no
+    /// request of its own in `take_interrupt`, and publishes its limit again.
     ///
     /// Ordering: this is one half of a store-buffering (Dekker) pattern with
     /// [`VMStoreContext::request_interrupt`]. The writer stores the limit and
@@ -1393,11 +1467,10 @@ impl VMStoreContext {
     /// missed its flag. Weaker orderings would let both sides read the stale
     /// value of the other's location, which is exactly the lost interrupt.
     fn publish_stack_limit(&self) {
-        self.stack_limit
-            .store(self.real_stack_limit(), Ordering::SeqCst);
+        let word = self.published_stack_limit();
+        word.store(self.real_stack_limit(), Ordering::SeqCst);
         if self.interrupt_pending.load(Ordering::SeqCst) {
-            self.stack_limit
-                .store(Self::INTERRUPT_SENTINEL, Ordering::SeqCst);
+            word.store(Self::INTERRUPT_SENTINEL, Ordering::SeqCst);
         }
     }
 
@@ -1409,10 +1482,25 @@ impl VMStoreContext {
     /// sentinel and then takes the flag (with the acquire fence in
     /// `take_interrupt`) finds it set; see `publish_stack_limit` for why a
     /// concurrent writer cannot lose the request.
+    ///
+    /// With a per-processor limit the sentinel goes to the processor word
+    /// the store is published to; while it is published nowhere the flag
+    /// alone carries the request to its next publish. That is still one
+    /// atomic load more, with no lock, no allocation and no cross-processor
+    /// interrupt.
     pub(crate) fn request_interrupt(&self) {
         self.interrupt_pending.store(true, Ordering::SeqCst);
-        self.stack_limit
-            .store(Self::INTERRUPT_SENTINEL, Ordering::SeqCst);
+        let word = if self.per_processor_stack_limit {
+            let word = self.processor_stack_limit.load(Ordering::SeqCst);
+            if word.is_null() {
+                return;
+            }
+            // SAFETY: see `published_stack_limit`.
+            unsafe { AtomicUsize::from_ptr(word) }
+        } else {
+            &self.stack_limit
+        };
+        word.store(Self::INTERRUPT_SENTINEL, Ordering::SeqCst);
     }
 
     /// Whether a stack-limit interruption was requested and not yet taken.
@@ -1480,6 +1568,8 @@ impl Default for VMStoreContext {
             current_thread: UnsafeCell::new(VMLazyThread::none()),
             real_stack_limit: UnsafeCell::new(usize::MAX),
             interrupt_pending: AtomicBool::new(false),
+            per_processor_stack_limit: false,
+            processor_stack_limit: AtomicPtr::new(ptr::null_mut()),
         }
     }
 }
