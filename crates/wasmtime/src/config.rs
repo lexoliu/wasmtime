@@ -893,11 +893,19 @@ impl Config {
     /// Enables resumable interruption through the store's stack limit.
     ///
     /// With this enabled, compiled code compares the stack pointer with the
-    /// store's stack limit at every function entry, at every loop header and
-    /// between the chunks of a bulk memory operation. A failed compare does
-    /// not trap: it calls into the runtime, which either delivers a pending
-    /// interruption or raises the ordinary stack-overflow trap when the stack
-    /// really is exhausted.
+    /// store's stack limit at the entry of every function that can call
+    /// another wasm function, at every loop header and between the chunks of
+    /// a bulk memory operation. A failed compare does not trap: it calls into
+    /// the runtime, which either delivers a pending interruption or raises
+    /// the ordinary stack-overflow trap when the stack really is exhausted.
+    ///
+    /// A function that calls no wasm function runs for bounded time outside
+    /// its loops, so its entry has no interruption check. With Cranelift it
+    /// keeps only the ordinary prologue stack-overflow check, made against
+    /// the store's configured limit, which an interruption never changes, and
+    /// omitted, as without this option, for a leaf function with no stack
+    /// frame. Such a leaf therefore stays a leaf: it makes no call and sets
+    /// up no frame unless it contains a loop or a bulk memory operation.
     ///
     /// An interruption is requested from any thread, or from an interrupt
     /// handler, through a [`StoreInterruptHandle`](crate::StoreInterruptHandle)
@@ -3146,7 +3154,7 @@ impl Config {
 
         if tunables.stack_limit_interruption {
             // Two preemption mechanisms in one engine would emit two checks at
-            // every function entry and loop header for the same purpose.
+            // function entries and loop headers for the same purpose.
             if tunables.epoch_interruption {
                 bail!("`stack_limit_interruption` and `epoch_interruption` cannot both be enabled");
             }
@@ -5418,6 +5426,11 @@ impl Engine {
     #[doc(hidden)]
     pub fn get_mmu_interruption(&self) -> bool {
         self.tunables().mmu_interruption
+    }
+
+    /// Returns the configured [`Config::stack_limit_interruption`] value.
+    pub fn get_stack_limit_interruption(&self) -> bool {
+        self.tunables().stack_limit_interruption
     }
 
     /// Returns the configured [`Config::consume_fuel`] value.

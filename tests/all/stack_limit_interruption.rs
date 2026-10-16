@@ -226,6 +226,131 @@ async fn unbounded_recursion_overflows_while_interrupted(config: &mut Config) ->
     Ok(())
 }
 
+/// The name of the innermost wasm frame of a trap's backtrace.
+fn innermost_frame(error: &Error) -> Option<&str> {
+    error
+        .downcast_ref::<WasmBacktrace>()
+        .expect("traps carry a wasm backtrace")
+        .frames()
+        .first()
+        .and_then(|frame| frame.func_name())
+}
+
+#[wasmtime_test(strategies(not(CraneliftPulley)))]
+fn call_free_leaf_is_interrupted_at_its_loop_header(config: &mut Config) -> Result<()> {
+    let engine = build_engine(config)?;
+    // `$spin` calls no wasm, so its entry has no interruption check: the
+    // interrupt can only be taken at its loop header.
+    let module = Module::new(
+        &engine,
+        r#"
+        (module
+            (func $spin (param i32) (result i32)
+                (loop $l
+                    (local.set 0 (i32.add (local.get 0) (i32.const 1)))
+                    (br $l))
+                (local.get 0))
+            (func (export "run") (result i32)
+                (call $spin (i32.const 0))))
+        "#,
+    )?;
+    // No callback: an interruption traps with `Trap::Interrupt`.
+    let mut store = Store::new(&engine, ());
+    interrupt_after(store.interrupt_handle()?, Duration::from_millis(50));
+
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
+    let error = run
+        .call(&mut store, ())
+        .expect_err("an infinite loop only ends through the interrupt");
+    assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::Interrupt));
+    assert_eq!(innermost_frame(&error), Some("spin"));
+    Ok(())
+}
+
+/// Unbounded recursion through `$f`, which first calls `$wide`: a function
+/// that calls no wasm and keeps sixty-four values live at once, so its frame
+/// is larger than one level of the recursion and its prologue check is the
+/// one that finds the stack exhausted. `poke` runs one interruptible entry
+/// check and nothing else.
+fn recursion_through_wide_leaf() -> String {
+    let loads: String = (0..64)
+        .map(|i| format!(" (i64.load offset={} (i32.const 0))", i * 8))
+        .collect();
+    let adds = " i64.add".repeat(63);
+    format!(
+        r#"
+        (module
+            (memory 1)
+            (func $wide (result i64){loads}{adds})
+            (func $f (export "run")
+                (drop (call $wide))
+                (call $f))
+            (func (export "poke")
+                (call $nothing))
+            (func $nothing))
+        "#
+    )
+}
+
+#[derive(Default)]
+struct Interrupts {
+    delivered: u32,
+    rearm: bool,
+}
+
+#[wasmtime_test(strategies(not(CraneliftPulley)))]
+fn call_free_leaf_overflow_traps_with_and_without_an_interrupt(config: &mut Config) -> Result<()> {
+    let engine = build_engine(config)?;
+    let module = Module::new(&engine, recursion_through_wide_leaf())?;
+    let mut store = Store::new(&engine, Interrupts::default());
+    let handle = store.interrupt_handle()?;
+    store.interrupt_callback(move |mut cx| {
+        cx.data_mut().delivered += 1;
+        if cx.data().rearm {
+            handle.interrupt();
+        }
+        Ok(InterruptAction::Continue)
+    });
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    let poke = instance.get_typed_func::<(), ()>(&mut store, "poke")?;
+
+    // No interrupt: the leaf's check against the real limit traps.
+    let error = run.call(&mut store, ()).unwrap_err();
+    assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::StackOverflow));
+    assert_eq!(innermost_frame(&error), Some("wide"));
+    assert_eq!(store.data().delivered, 0);
+
+    // An interrupt pending on entry is delivered at `$f`'s first entry, and
+    // the overflow is still reported as one.
+    store.interrupt_handle()?.interrupt();
+    let error = run.call(&mut store, ()).unwrap_err();
+    assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::StackOverflow));
+    assert_eq!(innermost_frame(&error), Some("wide"));
+    assert_eq!(store.data().delivered, 1);
+
+    // Every delivery re-arms another interrupt, so one is pending when the
+    // leaf's check finds the stack exhausted. That check never sees the
+    // sentinel: it reports the overflow, and the interrupt stays pending.
+    store.data_mut().rearm = true;
+    store.interrupt_handle()?.interrupt();
+    let error = run.call(&mut store, ()).unwrap_err();
+    assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::StackOverflow));
+    assert_eq!(innermost_frame(&error), Some("wide"));
+    let delivered = store.data().delivered;
+    assert!(delivered > 2);
+
+    // The interrupt left pending by the overflow is delivered at the next
+    // check, not swallowed.
+    store.data_mut().rearm = false;
+    poke.call(&mut store, ())?;
+    assert_eq!(store.data().delivered, delivered + 1);
+    poke.call(&mut store, ())?;
+    assert_eq!(store.data().delivered, delivered + 1);
+    Ok(())
+}
+
 #[derive(Default)]
 struct Marks(Vec<&'static str>);
 
@@ -241,10 +366,13 @@ fn interrupt_during_host_call_is_delivered_on_return(config: &mut Config) -> Res
             (func (export "run")
                 call $interrupt
                 ;; The interrupt is observed at this function's entry, the
-                ;; first check after the host call returns.
+                ;; first check after the host call returns. `$check` calls
+                ;; wasm: a function that calls none has no entry check.
                 call $check
                 call $after)
-            (func $check))
+            (func $check
+                call $leaf)
+            (func $leaf))
         "#,
     )?;
     let mut store = Store::new(&engine, Marks::default());
