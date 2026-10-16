@@ -1,5 +1,5 @@
 test compile precise-output
-target riscv64
+target riscv64 has_v
 
 function %call_preserve_all_abi(i64) system_v {
     sig0 = (i64, i64, i64, i64) preserve_all

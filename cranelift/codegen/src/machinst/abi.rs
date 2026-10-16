@@ -499,6 +499,7 @@ pub trait ABIMachineSpec {
     fn compute_frame_layout(
         call_conv: isa::CallConv,
         flags: &settings::Flags,
+        isa_flags: &Self::F,
         sig: &Signature,
         regs: &[Writable<RealReg>],
         function_calls: FunctionCalls,
@@ -2305,6 +2306,7 @@ impl<M: ABIMachineSpec> Callee<M> {
         let frame_layout = M::compute_frame_layout(
             self.call_conv,
             &self.flags,
+            &self.isa_flags,
             self.signature(),
             &clobbered,
             function_calls,

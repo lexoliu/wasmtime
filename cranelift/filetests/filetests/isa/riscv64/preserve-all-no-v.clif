@@ -1,0 +1,267 @@
+test compile precise-output
+target riscv64
+
+function %call_preserve_all_abi(i64) system_v {
+    sig0 = (i64, i64, i64, i64) preserve_all
+block0(v0: i64):
+    call_indirect sig0, v0(v0, v0, v0, v0)
+    call_indirect sig0, v0(v0, v0, v0, v0)
+    return
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+; block0:
+;   mv a3,a0
+;   mv a1,a3
+;   mv a2,a3
+;   callind a3
+;   callind a3
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+; block1: ; offset 0x10
+;   mv a3, a0
+;   mv a1, a3
+;   mv a2, a3
+;   jalr a3
+;   jalr a3
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+function %preserve_all_abi_trampoline(i64) preserve_all {
+    fn0 = %libcall(i64) system_v
+block0(v0: i64):
+    call fn0(v0)
+    return
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   addi sp,sp,-304
+;   sd ra,296(sp)
+;   sd t0,288(sp)
+;   sd t1,280(sp)
+;   sd t2,272(sp)
+;   sd a0,264(sp)
+;   sd a1,256(sp)
+;   sd a2,248(sp)
+;   sd a3,240(sp)
+;   sd a4,232(sp)
+;   sd a5,224(sp)
+;   sd a6,216(sp)
+;   sd a7,208(sp)
+;   sd t3,200(sp)
+;   sd t4,192(sp)
+;   sd t5,184(sp)
+;   sd t6,176(sp)
+;   fsd ft0,168(sp)
+;   fsd ft1,160(sp)
+;   fsd ft2,152(sp)
+;   fsd ft3,144(sp)
+;   fsd ft4,136(sp)
+;   fsd ft5,128(sp)
+;   fsd ft6,120(sp)
+;   fsd ft7,112(sp)
+;   fsd fs1,104(sp)
+;   fsd fa0,96(sp)
+;   fsd fa1,88(sp)
+;   fsd fa2,80(sp)
+;   fsd fa3,72(sp)
+;   fsd fa4,64(sp)
+;   fsd fa5,56(sp)
+;   fsd fa6,48(sp)
+;   fsd fa7,40(sp)
+;   fsd ft8,32(sp)
+;   fsd ft9,24(sp)
+;   fsd ft10,16(sp)
+;   fsd ft11,8(sp)
+; block0:
+;   load_ext_name_far a1,%libcall+0
+;   callind a1
+;   ld ra,296(sp)
+;   ld t0,288(sp)
+;   ld t1,280(sp)
+;   ld t2,272(sp)
+;   ld a0,264(sp)
+;   ld a1,256(sp)
+;   ld a2,248(sp)
+;   ld a3,240(sp)
+;   ld a4,232(sp)
+;   ld a5,224(sp)
+;   ld a6,216(sp)
+;   ld a7,208(sp)
+;   ld t3,200(sp)
+;   ld t4,192(sp)
+;   ld t5,184(sp)
+;   ld t6,176(sp)
+;   fld ft0,168(sp)
+;   fld ft1,160(sp)
+;   fld ft2,152(sp)
+;   fld ft3,144(sp)
+;   fld ft4,136(sp)
+;   fld ft5,128(sp)
+;   fld ft6,120(sp)
+;   fld ft7,112(sp)
+;   fld fs1,104(sp)
+;   fld fa0,96(sp)
+;   fld fa1,88(sp)
+;   fld fa2,80(sp)
+;   fld fa3,72(sp)
+;   fld fa4,64(sp)
+;   fld fa5,56(sp)
+;   fld fa6,48(sp)
+;   fld fa7,40(sp)
+;   fld ft8,32(sp)
+;   fld ft9,24(sp)
+;   fld ft10,16(sp)
+;   fld ft11,8(sp)
+;   addi sp,sp,304
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   addi sp, sp, -0x130
+;   sd ra, 0x128(sp)
+;   sd t0, 0x120(sp)
+;   sd t1, 0x118(sp)
+;   sd t2, 0x110(sp)
+;   sd a0, 0x108(sp)
+;   sd a1, 0x100(sp)
+;   sd a2, 0xf8(sp)
+;   sd a3, 0xf0(sp)
+;   sd a4, 0xe8(sp)
+;   sd a5, 0xe0(sp)
+;   sd a6, 0xd8(sp)
+;   sd a7, 0xd0(sp)
+;   sd t3, 0xc8(sp)
+;   sd t4, 0xc0(sp)
+;   sd t5, 0xb8(sp)
+;   sd t6, 0xb0(sp)
+;   fsd ft0, 0xa8(sp)
+;   fsd ft1, 0xa0(sp)
+;   fsd ft2, 0x98(sp)
+;   fsd ft3, 0x90(sp)
+;   fsd ft4, 0x88(sp)
+;   fsd ft5, 0x80(sp)
+;   fsd ft6, 0x78(sp)
+;   fsd ft7, 0x70(sp)
+;   fsd fs1, 0x68(sp)
+;   fsd fa0, 0x60(sp)
+;   fsd fa1, 0x58(sp)
+;   fsd fa2, 0x50(sp)
+;   fsd fa3, 0x48(sp)
+;   fsd fa4, 0x40(sp)
+;   fsd fa5, 0x38(sp)
+;   fsd fa6, 0x30(sp)
+;   fsd fa7, 0x28(sp)
+;   fsd ft8, 0x20(sp)
+;   fsd ft9, 0x18(sp)
+;   fsd ft10, 0x10(sp)
+;   fsd ft11, 8(sp)
+; block1: ; offset 0xa8
+;   auipc a1, 0
+;   ld a1, 0xc(a1)
+;   j 0xc
+;   .byte 0x00, 0x00, 0x00, 0x00 ; reloc_external Abs8 %libcall 0
+;   .byte 0x00, 0x00, 0x00, 0x00
+;   jalr a1
+;   ld ra, 0x128(sp)
+;   ld t0, 0x120(sp)
+;   ld t1, 0x118(sp)
+;   ld t2, 0x110(sp)
+;   ld a0, 0x108(sp)
+;   ld a1, 0x100(sp)
+;   ld a2, 0xf8(sp)
+;   ld a3, 0xf0(sp)
+;   ld a4, 0xe8(sp)
+;   ld a5, 0xe0(sp)
+;   ld a6, 0xd8(sp)
+;   ld a7, 0xd0(sp)
+;   ld t3, 0xc8(sp)
+;   ld t4, 0xc0(sp)
+;   ld t5, 0xb8(sp)
+;   ld t6, 0xb0(sp)
+;   fld ft0, 0xa8(sp)
+;   fld ft1, 0xa0(sp)
+;   fld ft2, 0x98(sp)
+;   fld ft3, 0x90(sp)
+;   fld ft4, 0x88(sp)
+;   fld ft5, 0x80(sp)
+;   fld ft6, 0x78(sp)
+;   fld ft7, 0x70(sp)
+;   fld fs1, 0x68(sp)
+;   fld fa0, 0x60(sp)
+;   fld fa1, 0x58(sp)
+;   fld fa2, 0x50(sp)
+;   fld fa3, 0x48(sp)
+;   fld fa4, 0x40(sp)
+;   fld fa5, 0x38(sp)
+;   fld fa6, 0x30(sp)
+;   fld fa7, 0x28(sp)
+;   fld ft8, 0x20(sp)
+;   fld ft9, 0x18(sp)
+;   fld ft10, 0x10(sp)
+;   fld ft11, 8(sp)
+;   addi sp, sp, 0x130
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+function %preserve_all_call(i64) system_v {
+  fn0 = colocated %f(i64) preserve_all
+block0(v0: i64):
+  call fn0(v0)
+  return
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+; block0:
+;   call %f
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+; block1: ; offset 0x10
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %f 0
+;   jalr ra
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
