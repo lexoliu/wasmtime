@@ -1,0 +1,152 @@
+test compile precise-output
+set unwind_info=false
+target aarch64
+
+function %load_processor_local() -> i64 {
+block0:
+    v0 = load_processor_local.i64 +16
+    return v0
+}
+
+; VCode:
+; block0:
+;   mrs x0, tpidr_el1 ; ldr x0, [x0, #16]
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   mrs x0, tpidr_el1
+;   ldur x0, [x0, #0x10]
+;   ret
+
+function %load_processor_local_zero_offset() -> i64 {
+block0:
+    v0 = load_processor_local.i64
+    return v0
+}
+
+; VCode:
+; block0:
+;   mrs x0, tpidr_el1 ; ldr x0, [x0, #0]
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   mrs x0, tpidr_el1
+;   ldur x0, [x0]
+;   ret
+
+;; A stack-limit check against the processor's local block, as Wasmtime
+;; emits it at a loop header: the loaded limit's only use is the compare.
+function %stack_limit_check(i64) {
+    fn0 = colocated %interrupt(i64, i64)
+
+block0(v0: i64):
+    v1 = get_stack_pointer.i64
+    v2 = load_processor_local.i64 +16
+    v3 = icmp ult v1, v2
+    brif v3, block1, block2
+
+block1 cold:
+    call fn0(v0, v1)
+    jump block2
+
+block2:
+    return
+}
+
+; VCode:
+;   stp fp, lr, [sp, #-16]!
+;   mov fp, sp
+; block0:
+;   mov x1, sp
+;   mrs x3, tpidr_el1 ; ldr x3, [x3, #16]
+;   subs xzr, x1, x3
+;   b.lo label2 ; b label1
+; block1:
+;   b label3
+; block3:
+;   ldp fp, lr, [sp], #16
+;   ret
+; block2:
+;   bl 0
+;   b label3
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   stp x29, x30, [sp, #-0x10]!
+;   mov x29, sp
+; block1: ; offset 0x8
+;   mov x1, sp
+;   mrs x3, tpidr_el1
+;   ldur x3, [x3, #0x10]
+;   cmp x1, x3
+;   b.lo #0x24
+; block2: ; offset 0x1c
+;   ldp x29, x30, [sp], #0x10
+;   ret
+; block3: ; offset 0x24
+;   bl #0x24 ; reloc_external Call %interrupt 0
+;   b #0x1c
+
+;; A limit used twice cannot be folded into the compare.
+function %stack_limit_check_reused(i64) -> i64 {
+    fn0 = colocated %interrupt(i64, i64)
+
+block0(v0: i64):
+    v1 = get_stack_pointer.i64
+    v2 = load_processor_local.i64 +16
+    v3 = icmp ult v1, v2
+    brif v3, block1, block2
+
+block1 cold:
+    call fn0(v0, v1)
+    jump block2
+
+block2:
+    return v2
+}
+
+; VCode:
+;   stp fp, lr, [sp, #-16]!
+;   mov fp, sp
+;   str x19, [sp, #-16]!
+; block0:
+;   mov x1, sp
+;   mrs x19, tpidr_el1 ; ldr x19, [x19, #16]
+;   subs xzr, x1, x19
+;   b.lo label2 ; b label1
+; block1:
+;   mov x0, x19
+;   b label3
+; block3:
+;   ldr x19, [sp], #16
+;   ldp fp, lr, [sp], #16
+;   ret
+; block2:
+;   bl 0
+;   mov x0, x19
+;   b label3
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   stp x29, x30, [sp, #-0x10]!
+;   mov x29, sp
+;   str x19, [sp, #-0x10]!
+; block1: ; offset 0xc
+;   mov x1, sp
+;   mrs x19, tpidr_el1
+;   ldur x19, [x19, #0x10]
+;   cmp x1, x19
+;   b.lo #0x30
+; block2: ; offset 0x20
+;   mov x0, x19
+; block3: ; offset 0x24
+;   ldr x19, [sp], #0x10
+;   ldp x29, x30, [sp], #0x10
+;   ret
+; block4: ; offset 0x30
+;   bl #0x30 ; reloc_external Call %interrupt 0
+;   mov x0, x19
+;   b #0x24
+

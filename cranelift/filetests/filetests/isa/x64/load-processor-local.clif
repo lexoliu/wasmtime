@@ -1,0 +1,280 @@
+test compile precise-output
+set unwind_info=false
+target x86_64
+
+function %load_processor_local() -> i64 {
+block0:
+    v0 = load_processor_local.i64 +16
+    return v0
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   movq    %fs:16, %rax
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movq %fs:0x10, %rax
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %load_processor_local_zero_offset() -> i64 {
+block0:
+    v0 = load_processor_local.i64
+    return v0
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   movq    %fs:0, %rax
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movq %fs:0, %rax
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; A stack-limit check against the processor's local block, as Wasmtime
+;; emits it at a loop header: the loaded limit's only use is the compare.
+function %stack_limit_check(i64) {
+    fn0 = colocated %interrupt(i64, i64)
+
+block0(v0: i64):
+    v1 = get_stack_pointer.i64
+    v2 = load_processor_local.i64 +16
+    v3 = icmp ult v1, v2
+    brif v3, block1, block2
+
+block1 cold:
+    call fn0(v0, v1)
+    jump block2
+
+block2:
+    return
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   movq    %rsp, %rsi
+;   cmpq    %fs:16, %rsp
+;   jb      label2; j label1
+; block1:
+;   jmp     label3
+; block3:
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block2:
+;   call    TestCase(%interrupt)
+;   jmp     label3
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movq %rsp, %rsi
+;   cmpq %fs:0x10, %rsp
+;   jb 0x1b
+; block2: ; offset 0x16
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block3: ; offset 0x1b
+;   callq 0x20 ; reloc_external CallPCRel4 %interrupt -4
+;   jmp 0x16
+
+;; A limit used twice cannot be folded into the compare.
+function %stack_limit_check_reused(i64) -> i64 {
+    fn0 = colocated %interrupt(i64, i64)
+
+block0(v0: i64):
+    v1 = get_stack_pointer.i64
+    v2 = load_processor_local.i64 +16
+    v3 = icmp ult v1, v2
+    brif v3, block1, block2
+
+block1 cold:
+    call fn0(v0, v1)
+    jump block2
+
+block2:
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x10, %rsp
+;   movq %rbx, (%rsp)
+; block0:
+;   movq    %rsp, %rsi
+;   movq    %fs:16, %rbx
+;   cmpq %rbx, %rsi
+;   jb      label2; j label1
+; block1:
+;   movq %rbx, %rax
+;   jmp     label3
+; block3:
+;   movq (%rsp), %rbx
+;   addq $0x10, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block2:
+;   call    TestCase(%interrupt)
+;   movq %rbx, %rax
+;   jmp     label3
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x10, %rsp
+;   movq %rbx, (%rsp)
+; block1: ; offset 0xc
+;   movq %rsp, %rsi
+;   movq %fs:0x10, %rbx
+;   cmpq %rbx, %rsi
+;   jb 0x31
+; block2: ; offset 0x21
+;   movq %rbx, %rax
+; block3: ; offset 0x24
+;   movq (%rsp), %rbx
+;   addq $0x10, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block4: ; offset 0x31
+;   callq 0x36 ; reloc_external CallPCRel4 %interrupt -4
+;   movq %rbx, %rax
+;   jmp 0x24
+
+
+;; The check Wasmtime emits passes no stack pointer to the interrupt
+;; builtin, so the compare reads `rsp` and no register holds it.
+function %stack_limit_check_sp_unused(i64) {
+    fn0 = colocated %interrupt(i64)
+
+block0(v0: i64):
+    v1 = get_stack_pointer.i64
+    v2 = load_processor_local.i64 +16
+    v3 = icmp ult v1, v2
+    brif v3, block1, block2
+
+block1 cold:
+    call fn0(v0)
+    jump block2
+
+block2:
+    return
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   cmpq    %fs:16, %rsp
+;   jb      label2; j label1
+; block1:
+;   jmp     label3
+; block3:
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block2:
+;   call    TestCase(%interrupt)
+;   jmp     label3
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   cmpq %fs:0x10, %rsp
+;   jb 0x18
+; block2: ; offset 0x13
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block3: ; offset 0x18
+;   callq 0x1d ; reloc_external CallPCRel4 %interrupt -4
+;   jmp 0x13
+
+;; A store between the load and the branch is a side effect the load may not
+;; move past, so the limit is read where the CLIF reads it.
+function %stack_limit_check_after_store(i64) {
+    fn0 = colocated %interrupt(i64)
+
+block0(v0: i64):
+    v1 = get_stack_pointer.i64
+    v2 = load_processor_local.i64 +16
+    store.i64 v0, v0
+    v3 = icmp ult v1, v2
+    brif v3, block1, block2
+
+block1 cold:
+    call fn0(v0)
+    jump block2
+
+block2:
+    return
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   movq    %rsp, %rsi
+;   movq    %fs:16, %r8
+;   movq %rdi, (%rdi)
+;   cmpq %r8, %rsi
+;   jb      label2; j label1
+; block1:
+;   jmp     label3
+; block3:
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block2:
+;   call    TestCase(%interrupt)
+;   jmp     label3
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movq %rsp, %rsi
+;   movq %fs:0x10, %r8
+;   movq %rdi, (%rdi) ; trap: heap_oob
+;   cmpq %r8, %rsi
+;   jb 0x21
+; block2: ; offset 0x1c
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block3: ; offset 0x21
+;   callq 0x26 ; reloc_external CallPCRel4 %interrupt -4
+;   jmp 0x1c
+

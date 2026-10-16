@@ -2635,6 +2635,11 @@
                               next_load_ptr))))
        (output_reg next_load_ptr)))
 
+;;; Rules for `load_processor_local` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (load_processor_local $I64 (offset32 offset)))
+      (a64_load_processor_local offset))
+
 ;;; Rules for `get_{frame,stack}_pointer` and `get_return_address` ;;;;;;;;;;;;;
 
 (rule (lower (get_frame_pointer _))
