@@ -198,7 +198,8 @@ unsafe extern "C" {
     /// whichever processor calls it, and the word must stay valid for as long
     /// as the processor runs wasm. Wasmtime accesses the word only with
     /// pointer-sized atomics. It is called only by engines configured that
-    /// way; an embedding that never configures it may abort here.
+    /// way.
+    #[cfg(has_processor_stack_limit)]
     pub fn wasmtime_processor_stack_limit() -> *mut usize;
 
     /// Frees a synchronization lock.

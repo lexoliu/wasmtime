@@ -23,6 +23,7 @@ header = """
 // * `WASMTIME_SIGNALS_BASED_TRAPS` - corresponds to `signals-based-traps`
 // * `WASMTIME_CUSTOM_SYNC` - corresponds to `custom-sync-primitives`
 // * `WASMTIME_CUSTOM_FIBER` - corresponds to `custom-fiber`
+// * `WASMTIME_PROCESSOR_STACK_LIMIT` - corresponds to `custom-processor-stack-limit`
 //
 // Some more information about this header can additionally be found at
 // <https://docs.wasmtime.dev/stability-platform-support.html>.
@@ -33,3 +34,4 @@ has_virtual_memory = 'WASMTIME_VIRTUAL_MEMORY'
 has_native_signals = 'WASMTIME_NATIVE_SIGNALS'
 has_custom_sync = 'WASMTIME_CUSTOM_SYNC'
 has_custom_fiber = 'WASMTIME_CUSTOM_FIBER'
+has_processor_stack_limit = 'WASMTIME_PROCESSOR_STACK_LIMIT'

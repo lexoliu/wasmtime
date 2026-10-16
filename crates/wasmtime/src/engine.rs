@@ -403,16 +403,16 @@ impl Engine {
         if !cfg!(target_has_atomic = "64") && self.tunables().epoch_interruption {
             return Err("epochs currently require 64-bit atomics".into());
         }
-        if cfg!(any(miri, feature = "std"))
+        if !cfg!(has_processor_stack_limit)
             && matches!(
                 self.tunables().stack_limit_location,
                 wasmtime_environ::StackLimitLocation::PerProcessor { .. }
             )
         {
             return Err(
-                "a per-processor stack limit needs a custom platform, which provides \
-                 `wasmtime_processor_stack_limit` -- this build of Wasmtime uses the standard \
-                 library's platform"
+                "a per-processor stack limit needs a custom platform that provides \
+                 `wasmtime_processor_stack_limit` -- this build of Wasmtime does not link it \
+                 (it needs the `custom-processor-stack-limit` feature without `std`)"
                     .into(),
             );
         }

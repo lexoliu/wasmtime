@@ -43,6 +43,7 @@ pub fn tls_set(ptr: *mut u8) {
 /// The executing processor's stack-limit word, for
 /// `StackLimitLocation::PerProcessor`.
 #[inline]
+#[cfg(has_processor_stack_limit)]
 pub fn processor_stack_limit() -> *mut usize {
     unsafe { capi::wasmtime_processor_stack_limit() }
 }

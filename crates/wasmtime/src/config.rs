@@ -836,8 +836,9 @@ impl Config {
     /// [`Engine::new`](crate::Engine::new) refuses the per-processor location
     /// unless `stack_limit_interruption` is enabled and the target is x86-64,
     /// AArch64 or RISC-V 64. Such an engine compiles code for any host, but
-    /// only a custom-platform build (without the `std` feature), the one
-    /// that links the hook, runs it.
+    /// only a custom-platform build (without the `std` feature) with the
+    /// `custom-processor-stack-limit` feature, the one that links the hook,
+    /// runs it.
     pub fn stack_limit_location(&mut self, location: StackLimitLocation) -> &mut Self {
         self.tunables.stack_limit_location = Some(location);
         self

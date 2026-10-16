@@ -383,6 +383,12 @@ custom-native-signals = []
 # Same as `custom-virtual-memory` above, but for custom sync primitive APIs.
 custom-sync-primitives = []
 
+# Same as `custom-virtual-memory` above, but for the custom-platform hook
+# `wasmtime_processor_stack_limit`, which an engine configured with
+# `StackLimitLocation::PerProcessor` needs to run. Without it such an engine
+# still compiles code; this build refuses to run it.
+custom-processor-stack-limit = []
+
 # Same as `custom-virtual-memory` above, but for custom fiber APIs.
 custom-fiber = ["wasmtime-fiber?/custom"]
 
