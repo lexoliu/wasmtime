@@ -509,3 +509,171 @@ fn values_live_across_an_interrupted_check_survive(config: &mut Config) -> Resul
     assert_eq!(interrupted.3, quiet.3);
     Ok(())
 }
+
+/// The bulk-memory libcalls' chunk: a request is delivered between two runs of
+/// this many bytes.
+const BULK_CHUNK: usize = wasmtime_environ::BULK_MEMORY_CHUNK_SIZE as usize;
+const PAGE: usize = 64 * 1024;
+
+/// Bulk-memory exports that request an interruption through a host call and
+/// then run one `memory.copy` or `memory.fill`, with no check in between: the
+/// function's only check is its entry, which runs before the host call.
+fn bulk_module(pages: usize) -> String {
+    format!(
+        r#"
+        (module
+            (import "" "request" (func $request))
+            (memory (export "memory") {pages})
+            (func (export "copy") (param $dst i32) (param $src i32) (param $len i32)
+                call $request
+                (memory.copy (local.get $dst) (local.get $src) (local.get $len)))
+            (func (export "fill") (param $dst i32) (param $val i32) (param $len i32)
+                call $request
+                (memory.fill (local.get $dst) (local.get $val) (local.get $len))))
+        "#
+    )
+}
+
+/// What the interrupt callback saw of linear memory when it ran.
+#[derive(Default)]
+struct BulkInterrupts {
+    memory: Option<Memory>,
+    /// The bytes at each probed address, one entry per delivery.
+    seen: Vec<Vec<u8>>,
+    probes: Vec<usize>,
+    stop: bool,
+}
+
+fn bulk_instance(
+    config: &mut Config,
+    pages: usize,
+    probes: Vec<usize>,
+) -> Result<(Store<BulkInterrupts>, Instance)> {
+    let engine = build_engine(config)?;
+    let module = Module::new(&engine, bulk_module(pages))?;
+    let mut store = Store::new(
+        &engine,
+        BulkInterrupts {
+            probes,
+            ..BulkInterrupts::default()
+        },
+    );
+    store.interrupt_callback(|mut cx| {
+        let memory = cx.data().memory.expect("the instance's memory is recorded");
+        let seen = cx
+            .data()
+            .probes
+            .iter()
+            .map(|&at| memory.data(&cx)[at])
+            .collect();
+        cx.data_mut().seen.push(seen);
+        if cx.data().stop {
+            Err(format_err!("stopped mid-operation"))
+        } else {
+            Ok(InterruptAction::Continue)
+        }
+    });
+    let handle = store.interrupt_handle()?;
+    let mut linker = Linker::new(store.engine());
+    linker.func_wrap("", "request", move || handle.interrupt())?;
+    let instance = linker.instantiate(&mut store, &module)?;
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    store.data_mut().memory = Some(memory);
+    Ok((store, instance))
+}
+
+/// A request made while a forwards copy runs is delivered once, after the
+/// first chunk and before the rest.
+#[wasmtime_test(strategies(not(CraneliftPulley)), wasm_features(bulk_memory))]
+fn a_long_copy_delivers_a_request_between_chunks(config: &mut Config) -> Result<()> {
+    let len = BULK_CHUNK + PAGE;
+    let (src, dst) = (0, len);
+    let (mut store, instance) = bulk_instance(config, 2 * len / PAGE, vec![dst, dst + len - 1])?;
+    let memory = store.data().memory.unwrap();
+    memory.data_mut(&mut store)[src..src + len].fill(0x5a);
+
+    let copy = instance.get_typed_func::<(i32, i32, i32), ()>(&mut store, "copy")?;
+    copy.call(
+        &mut store,
+        (
+            i32::try_from(dst)?,
+            i32::try_from(src)?,
+            i32::try_from(len)?,
+        ),
+    )?;
+    assert_eq!(store.data().seen, [[0x5a, 0x00]]);
+    assert_eq!(memory.data(&store)[dst + len - 1], 0x5a);
+    Ok(())
+}
+
+/// A copy whose destination overlaps its source from above runs backwards,
+/// highest chunk first, and still delivers between chunks with `memmove`
+/// semantics intact.
+#[wasmtime_test(strategies(not(CraneliftPulley)), wasm_features(bulk_memory))]
+fn an_overlapping_copy_runs_backwards_and_delivers_between_chunks(
+    config: &mut Config,
+) -> Result<()> {
+    let len = BULK_CHUNK + PAGE;
+    let (src, dst) = (0, PAGE);
+    let pattern = |at: usize| u8::try_from(at / PAGE % 251 + 1).unwrap();
+    let (mut store, instance) = bulk_instance(config, len / PAGE + 1, vec![dst, dst + len - 1])?;
+    let memory = store.data().memory.unwrap();
+    for (at, byte) in memory.data_mut(&mut store)[..len].iter_mut().enumerate() {
+        *byte = pattern(at);
+    }
+
+    let copy = instance.get_typed_func::<(i32, i32, i32), ()>(&mut store, "copy")?;
+    copy.call(
+        &mut store,
+        (
+            i32::try_from(dst)?,
+            i32::try_from(src)?,
+            i32::try_from(len)?,
+        ),
+    )?;
+    // At delivery the highest chunk is in place and the lowest is not: the
+    // destination's first byte still holds what was there before the copy.
+    assert_eq!(store.data().seen, [[pattern(dst), pattern(src + len - 1)]]);
+    let data = memory.data(&store);
+    for at in [0, 1, PAGE - 1, PAGE, BULK_CHUNK, len - 1] {
+        assert_eq!(data[dst + at], pattern(src + at), "byte {at} of the copy");
+    }
+    Ok(())
+}
+
+/// A request that ends execution during a fill leaves the chunk already
+/// filled in place and returns the callback's error.
+#[wasmtime_test(strategies(not(CraneliftPulley)), wasm_features(bulk_memory))]
+fn an_interrupt_that_ends_a_fill_keeps_the_filled_chunk(config: &mut Config) -> Result<()> {
+    let len = BULK_CHUNK + PAGE;
+    let (mut store, instance) = bulk_instance(config, len / PAGE, vec![0, BULK_CHUNK])?;
+    store.data_mut().stop = true;
+    let memory = store.data().memory.unwrap();
+
+    let fill = instance.get_typed_func::<(i32, i32, i32), ()>(&mut store, "fill")?;
+    let error = fill
+        .call(&mut store, (0, 0xab, i32::try_from(len)?))
+        .unwrap_err();
+    assert_eq!(error.root_cause().to_string(), "stopped mid-operation");
+    assert_eq!(store.data().seen, [[0xab, 0x00]]);
+    let data = memory.data(&store);
+    assert_eq!(data[BULK_CHUNK - 1], 0xab);
+    assert_eq!(data[BULK_CHUNK], 0x00);
+    Ok(())
+}
+
+/// An operation no longer than one chunk never stops to deliver: the request
+/// stays pending for the next check.
+#[wasmtime_test(strategies(not(CraneliftPulley)), wasm_features(bulk_memory))]
+fn a_one_chunk_operation_leaves_a_request_pending(config: &mut Config) -> Result<()> {
+    let (mut store, instance) = bulk_instance(config, 1, vec![0])?;
+    let fill = instance.get_typed_func::<(i32, i32, i32), ()>(&mut store, "fill")?;
+    fill.call(&mut store, (0, 0xab, i32::try_from(PAGE)?))?;
+    assert!(store.data().seen.is_empty());
+
+    // The next call's entry check delivers it, before its own host call
+    // requests another.
+    fill.call(&mut store, (0, 0xcd, 1))?;
+    assert_eq!(store.data().seen, [[0xab]]);
+    Ok(())
+}

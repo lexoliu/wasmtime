@@ -1415,6 +1415,15 @@ impl VMStoreContext {
             .store(Self::INTERRUPT_SENTINEL, Ordering::SeqCst);
     }
 
+    /// Whether a stack-limit interruption was requested and not yet taken.
+    ///
+    /// A relaxed read for a host path that polls for requests (a bulk-memory
+    /// libcall between chunks); [`VMStoreContext::take_interrupt`] is what
+    /// synchronizes with the requester.
+    pub(crate) fn interrupt_requested(&self) -> bool {
+        self.interrupt_pending.load(Ordering::Relaxed)
+    }
+
     /// Takes a pending interruption, restoring the real limit for compiled
     /// code. Returns whether an interruption was pending.
     ///

@@ -34,11 +34,11 @@ use wasmparser::{
 };
 use wasmtime_core::math::f64_cvt_to_int_bounds;
 use wasmtime_environ::{
-    BuiltinFunctionIndex, ComponentPC, ConstExpr, ConstOp, DataIndex, DefinedFuncIndex,
-    DefinedGlobalIndex, DefinedTableIndex, ElemIndex, EngineOrModuleTypeIndex, FactInlineIntrinsic,
-    FrameStateSlotBuilder, FrameValType, FuncIndex, FuncKey, GlobalConstValue, GlobalIndex,
-    IndexType, KnownFunc, Memory, MemoryIndex, MemoryInit, MemorySegmentOffset, MemoryTunables,
-    Module, ModuleInternedTypeIndex, ModuleTranslation, ModuleTypesBuilder,
+    BULK_MEMORY_CHUNK_SIZE, BuiltinFunctionIndex, ComponentPC, ConstExpr, ConstOp, DataIndex,
+    DefinedFuncIndex, DefinedGlobalIndex, DefinedTableIndex, ElemIndex, EngineOrModuleTypeIndex,
+    FactInlineIntrinsic, FrameStateSlotBuilder, FrameValType, FuncIndex, FuncKey, GlobalConstValue,
+    GlobalIndex, IndexType, KnownFunc, Memory, MemoryIndex, MemoryInit, MemorySegmentOffset,
+    MemoryTunables, Module, ModuleInternedTypeIndex, ModuleTranslation, ModuleTypesBuilder,
     NUM_COMPONENT_CONTEXT_SLOTS, PassiveElemIndex, PtrSize, RuntimeDataIndex, Table, TableIndex,
     TableInitialValue, TableSegment, TableSegmentElements, TagIndex, Tunables, TypeConvert,
     TypeIndex, VMOffsets, WasmCompositeInnerType, WasmFuncType, WasmHeapTopType, WasmHeapType,
@@ -805,7 +805,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
     }
 
     /// Emits the resumable stack-limit check used by stack-limit
-    /// interruption at loop headers and between bulk-memory chunks.
+    /// interruption at loop headers.
     ///
     /// Nothing is cached across the body: the store-context pointer load is
     /// read-only and may be hoisted, but the limit itself is reloaded at
@@ -3711,26 +3711,18 @@ impl FuncEnvironment<'_> {
             }
         }
 
-        // Very scientifically chosen. Or, more seriously, this is just an
-        // arbitrary number for now. 100k copies of this size locally takes half
-        // a second, so seems like a reasonably large chunk size to not hit perf
-        // too much by chunking but also enable time slicing.
-        const UNINTERRUPTABLE_CHUNK_SIZE: i64 = 128 << 20;
-
         let mut pos = builder.cursor();
         let vmctx = self.vmctx_val(&mut pos);
         let pointer_type = self.pointer_type();
 
         // Performs a raw call to the actual libcall, as dictated by the
         // provided `op`. This unconditionally inserts epoch/fuel checks for all
-        // calls.
+        // calls. Stack-limit interruption needs no check here: the libcall
+        // delivers a request between chunks itself.
         let raw_call =
             |env: &mut FuncEnvironment<'_>, builder: &mut FunctionBuilder<'_>, op: &_| {
                 if env.tunables.epoch_interruption {
                     env.epoch_check(builder);
-                }
-                if env.tunables.stack_limit_interruption {
-                    env.stack_limit_interrupt_check(builder);
                 }
                 match *op {
                     BulkOp::MemoryCopy { dst, src, len, .. } => {
@@ -3762,11 +3754,10 @@ impl FuncEnvironment<'_> {
             };
 
         // If epochs and fuel are disabled, then just call the libcall and
-        // return. No need for the loops below.
-        if !self.tunables.epoch_interruption
-            && !self.tunables.stack_limit_interruption
-            && !self.tunables.consume_fuel
-        {
+        // return. No need for the loops below. Stack-limit interruption does
+        // not need them either: the libcall chunks the operation and delivers
+        // a request between chunks.
+        if !self.tunables.epoch_interruption && !self.tunables.consume_fuel {
             raw_call(self, builder, &op);
             return;
         }
@@ -3788,7 +3779,7 @@ impl FuncEnvironment<'_> {
 
         let chunk = builder
             .ins()
-            .iconst(pointer_type, UNINTERRUPTABLE_CHUNK_SIZE);
+            .iconst(pointer_type, i64::from(BULK_MEMORY_CHUNK_SIZE));
 
         // For `memcpy` when chunking this up we might need to do a backwards
         // copy or a forwards copy. Determine that here and jump to the

@@ -18,7 +18,7 @@
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly can_move region0 gv0+8
 ;;     gv2 = load.i64 notrap aligned region1 gv1+24
-;;     sig0 = (i64 vmctx, i64, i32, i64) tail
+;;     sig0 = (i64 vmctx, i64, i32, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;     stack_limit = gv2
 ;;
@@ -45,7 +45,7 @@
 ;; @0027                               v37 = iadd v8, v36
 ;; @0027                               v39 = icmp ugt v38, v37
 ;; @0027                               trapnz v39, user2
-;; @0027                               call fn0(v0, v29, v4, v15)
+;; @0027                               v40 = call fn0(v0, v29, v4, v15)
 ;; @002a                               jump block1
 ;;
 ;;                                 block1:

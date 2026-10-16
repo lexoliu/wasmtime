@@ -358,36 +358,100 @@ fn passive_elem_segment_drop(
 }
 
 // Implementation of `memory.copy`.
+//
+// The copy runs in chunks of `BULK_MEMORY_CHUNK_SIZE` bytes, and a stack-limit
+// interruption requested while it runs is delivered between two chunks, so a
+// long copy answers a request within one chunk's worth of work. Compiled code
+// does not chunk the call for stack-limit interruption: the libcall is the
+// only place that has to know. A request that ends execution leaves the
+// chunks already copied in place, which is what any interruption of a partial
+// copy observes.
 unsafe fn memory_copy(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _instance: InstanceId,
     dst: *mut u8,
     src: *mut u8,
     len: usize,
-) {
+) -> Result<()> {
     let src = src.cast_const();
+    let chunk = bulk_memory_chunk_size();
     // FIXME(#4203): this is known to not be sound in the presence of shared
     // memories.
-    unsafe { src.copy_to(dst, len) }
+    if dst.addr() <= src.addr() {
+        // A forwards copy never overwrites a source byte it has yet to read.
+        let mut copied = 0;
+        while copied < len {
+            if copied != 0 {
+                deliver_requested_interrupt(store)?;
+            }
+            let n = chunk.min(len - copied);
+            unsafe { src.add(copied).copy_to(dst.add(copied), n) };
+            copied += n;
+        }
+    } else {
+        // The destination overlaps the source from above: copy the highest
+        // chunk first.
+        let mut remaining = len;
+        while remaining != 0 {
+            if remaining != len {
+                deliver_requested_interrupt(store)?;
+            }
+            let n = chunk.min(remaining);
+            remaining -= n;
+            unsafe { src.add(remaining).copy_to(dst.add(remaining), n) };
+        }
+    }
+    Ok(())
 }
 
+// Implementation of `memory.fill`, chunked like `memory_copy`.
 unsafe fn memory_fill(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _instance: InstanceId,
     dst: *mut u8,
     val: u32,
     len: usize,
-) {
-    // FIXME(#4203): this is known to not be sound in the presence of shared
-    // memories.
-    unsafe {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the libcall intentionally takes the raw 32-bit value, \
-                      and semantically that's intentionally truncated"
-        )]
-        dst.write_bytes(val as u8, len);
+) -> Result<()> {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the libcall intentionally takes the raw 32-bit value, \
+                  and semantically that's intentionally truncated"
+    )]
+    let val = val as u8;
+    let chunk = bulk_memory_chunk_size();
+    let mut filled = 0;
+    while filled < len {
+        if filled != 0 {
+            deliver_requested_interrupt(store)?;
+        }
+        let n = chunk.min(len - filled);
+        // FIXME(#4203): this is known to not be sound in the presence of
+        // shared memories.
+        unsafe { dst.add(filled).write_bytes(val, n) };
+        filled += n;
     }
+    Ok(())
+}
+
+/// The largest run of a bulk-memory libcall between two chances to deliver a
+/// stack-limit interruption.
+fn bulk_memory_chunk_size() -> usize {
+    usize::try_from(wasmtime_environ::BULK_MEMORY_CHUNK_SIZE)
+        .expect("the bulk-memory chunk size fits a host pointer")
+}
+
+/// Delivers a stack-limit interruption between two chunks of a bulk-memory
+/// libcall if one was requested.
+///
+/// The request flag is only read here; the delivery takes it. A store whose
+/// engine does not enable stack-limit interruption never has a request, since
+/// [`StoreInterruptHandle`](crate::StoreInterruptHandle)s are only handed out
+/// with it enabled.
+fn deliver_requested_interrupt(store: &mut dyn VMStore) -> Result<()> {
+    if store.vm_store_context().interrupt_requested() {
+        deliver_interrupt(store)?;
+    }
+    Ok(())
 }
 
 // Implementation of `ref.func`.
@@ -762,34 +826,7 @@ fn stack_limit_interrupt(
     _instance: InstanceId,
     sp: *mut u8,
 ) -> Result<()> {
-    use crate::InterruptAction;
-
-    // Clear the pending flag and re-arm the real limit before running the
-    // callback, so a request made while the callback runs (or while the
-    // guest is suspended in a yield) is delivered at the next check rather
-    // than cleared with this one.
-    if store.vm_store_context().take_interrupt() {
-        let action = store.stack_limit_interrupted()?;
-        block_on!(store, async move |store, asyncness| {
-            #[cfg(not(feature = "async"))]
-            let _ = (&store, asyncness);
-
-            match action {
-                InterruptAction::Continue => {}
-                #[cfg(feature = "async")]
-                InterruptAction::Yield => {
-                    if asyncness != Asyncness::Yes {
-                        bail!(
-                            "cannot use `InterruptAction::Yield` without using \
-                             an async wasm entrypoint",
-                        );
-                    }
-                    store.yield_now().await;
-                }
-            }
-            Ok(())
-        })??;
-    }
+    deliver_interrupt(store)?;
 
     // Whether or not an interruption was handled, a stack pointer below the
     // real limit is a genuine overflow and traps exactly as the ordinary
@@ -799,6 +836,42 @@ fn stack_limit_interrupt(
         return Err(Trap::StackOverflow.into());
     }
     Ok(())
+}
+
+/// Takes a pending stack-limit interruption, if there is one, and runs the
+/// store's interrupt callback for it: continue, yield, or end execution with
+/// the callback's error.
+///
+/// The pending flag is cleared and the real limit re-armed before the
+/// callback runs, so a request made while the callback runs (or while the
+/// guest is suspended in a yield) is delivered at the next check rather than
+/// cleared with this one.
+fn deliver_interrupt(store: &mut dyn VMStore) -> Result<()> {
+    use crate::InterruptAction;
+
+    if !store.vm_store_context().take_interrupt() {
+        return Ok(());
+    }
+    let action = store.stack_limit_interrupted()?;
+    block_on!(store, async move |store, asyncness| {
+        #[cfg(not(feature = "async"))]
+        let _ = (&store, asyncness);
+
+        match action {
+            InterruptAction::Continue => {}
+            #[cfg(feature = "async")]
+            InterruptAction::Yield => {
+                if asyncness != Asyncness::Yes {
+                    bail!(
+                        "cannot use `InterruptAction::Yield` without using \
+                         an async wasm entrypoint",
+                    );
+                }
+                store.yield_now().await;
+            }
+        }
+        Ok(())
+    })?
 }
 
 struct NextEpoch(u64);

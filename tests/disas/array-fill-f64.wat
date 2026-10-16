@@ -83,7 +83,7 @@
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly can_move region0 gv0+8
 ;;     gv2 = load.i64 notrap aligned region1 gv1+24
-;;     sig0 = (i64 vmctx, i64, i32, i64) tail
+;;     sig0 = (i64 vmctx, i64, i32, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;     stack_limit = gv2
 ;;
@@ -105,16 +105,16 @@
 ;; @0045                               v36 = load.i64 notrap aligned region3 v7+40
 ;; @0045                               v24 = iconst.i64 24
 ;; @0045                               v25 = iadd v9, v24  ; v24 = 24
-;;                                     v43 = iconst.i64 3
-;;                                     v44 = ishl v14, v43  ; v43 = 3
-;; @0045                               v29 = iadd v25, v44
-;;                                     v46 = ishl v15, v43  ; v43 = 3
-;; @0045                               v38 = uadd_overflow_trap v29, v46, user2
+;;                                     v44 = iconst.i64 3
+;;                                     v45 = ishl v14, v44  ; v44 = 3
+;; @0045                               v29 = iadd v25, v45
+;;                                     v47 = ishl v15, v44  ; v44 = 3
+;; @0045                               v38 = uadd_overflow_trap v29, v47, user2
 ;; @0045                               v37 = iadd v8, v36
 ;; @0045                               v39 = icmp ugt v38, v37
 ;; @0045                               trapnz v39, user2
 ;; @0045                               v40 = iconst.i32 0
-;; @0045                               call fn0(v0, v29, v40, v46)  ; v40 = 0
+;; @0045                               v41 = call fn0(v0, v29, v40, v47)  ; v40 = 0
 ;; @0048                               jump block1
 ;;
 ;;                                 block1:

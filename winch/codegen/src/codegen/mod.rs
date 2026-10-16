@@ -1661,7 +1661,9 @@ where
             &mut self.context,
             Callee::Builtin(builtin),
         )?;
-        Ok(())
+        // The `bool` result is the builtin's trap sentinel, already checked
+        // by the builtin trampoline.
+        self.context.pop_and_free(self.masm)
     }
 
     /// Emit the `memory.fill` operation.
@@ -1706,7 +1708,9 @@ where
             &mut self.context,
             Callee::Builtin(builtin),
         )?;
-        Ok(())
+        // The `bool` result is the builtin's trap sentinel, already checked
+        // by the builtin trampoline.
+        self.context.pop_and_free(self.masm)
     }
 
     /// Emit the `memory.init` operation.
@@ -1810,7 +1814,9 @@ where
             &mut self.context,
             Callee::Builtin(builtin),
         )?;
-        Ok(())
+        // The `bool` result is the builtin's trap sentinel, already checked
+        // by the builtin trampoline.
+        self.context.pop_and_free(self.masm)
     }
 
     pub fn emit_data_drop(&mut self, data_index: DataIndex) -> Result<()> {
