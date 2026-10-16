@@ -25,8 +25,8 @@ use wasmparser::{
 use wasmtime_cranelift::{TRAP_BAD_SIGNATURE, TRAP_HEAP_MISALIGNED, TRAP_TABLE_OUT_OF_BOUNDS};
 use wasmtime_environ::{
     DataIndex, ElemIndex, FUNCREF_INIT_BIT, FUNCREF_MASK, FuncIndex, GlobalIndex, IndexType,
-    MemoryIndex, MemoryKind, MemoryTunables, PtrSize, TableIndex, Tunables, TypeIndex,
-    WasmHeapType, WasmValType, wasm_unsupported,
+    MemoryIndex, MemoryKind, MemoryTunables, PtrSize, StackLimitLocation, TableIndex, Tunables,
+    TypeIndex, WasmHeapType, WasmValType, wasm_unsupported,
 };
 
 mod context;
@@ -2420,18 +2420,26 @@ where
             |cx, masm| Ok((cx.any_gpr(masm)?, cx.any_gpr(masm)?)),
         )??;
 
-        let store_context_offset = self.env.vmoffsets.ptr.vmctx().store_context();
-        let stack_limit_offset = self.env.vmoffsets.ptr.vm_store_context().stack_limit();
-        self.masm.load_ptr(
-            self.masm
-                .address_at_vmctx(u32::from(store_context_offset))?,
-            writable!(limit_reg),
-        )?;
-        self.masm.load_ptr(
-            self.masm
-                .address_at_reg(limit_reg, u32::from(stack_limit_offset))?,
-            writable!(limit_reg),
-        )?;
+        match self.tunables.stack_limit_location {
+            StackLimitLocation::StoreContext => {
+                let store_context_offset = self.env.vmoffsets.ptr.vmctx().store_context();
+                let stack_limit_offset = self.env.vmoffsets.ptr.vm_store_context().stack_limit();
+                self.masm.load_ptr(
+                    self.masm
+                        .address_at_vmctx(u32::from(store_context_offset))?,
+                    writable!(limit_reg),
+                )?;
+                self.masm.load_ptr(
+                    self.masm
+                        .address_at_reg(limit_reg, u32::from(stack_limit_offset))?,
+                    writable!(limit_reg),
+                )?;
+            }
+            StackLimitLocation::PerProcessor { offset } => {
+                self.masm
+                    .load_processor_local(offset, writable!(limit_reg))?;
+            }
+        }
         self.masm.stack_pointer(writable!(sp_reg))?;
 
         // Spill locals and registers to avoid conflicts at the control flow

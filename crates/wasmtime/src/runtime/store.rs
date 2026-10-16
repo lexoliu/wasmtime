@@ -111,7 +111,8 @@ use core::ptr::NonNull;
 use core::task::Poll;
 use wasmtime_core::undo::Undo;
 use wasmtime_environ::{
-    DefinedGlobalIndex, DefinedTableIndex, EntityRef, TripleExt, VMSharedTypeIndex,
+    DefinedGlobalIndex, DefinedTableIndex, EntityRef, StackLimitLocation, TripleExt,
+    VMSharedTypeIndex,
 };
 
 mod context;
@@ -865,7 +866,8 @@ impl<T> Store<T> {
             <NonNull<ManuallyDrop<T>>>::from(&mut inner.data_no_provenance).cast::<()>();
         // SAFETY: `store_data` lives in the boxed `StoreInner`, which outlives
         // all JIT execution in this store; a `StoreInterruptHandle` that
-        // outlives the store touches only `interrupt_pending` and `stack_limit`.
+        // outlives the store touches only `interrupt_pending`, `stack_limit`,
+        // `per_processor_stack_limit`, and `processor_stack_limit`.
         unsafe {
             let StoreOpaque {
                 store_data: opaque_store_data,
@@ -875,6 +877,10 @@ impl<T> Store<T> {
             let vm_store_context = Arc::get_mut(vm_store_context)
                 .expect("no interrupt handle exists before the store is constructed");
             vm_store_context.store_data = store_data.into();
+            vm_store_context.per_processor_stack_limit = matches!(
+                engine.tunables().stack_limit_location,
+                StackLimitLocation::PerProcessor { .. }
+            );
             opaque_store_data.publish_to_vm_store_context(vm_store_context);
         }
 

@@ -1062,6 +1062,11 @@ impl Masm for MacroAssembler {
         Ok(())
     }
 
+    fn load_processor_local(&mut self, offset: i32, dst: WritableReg) -> Result<()> {
+        self.asm.load_processor_local(offset, dst);
+        Ok(())
+    }
+
     fn epilogue(&mut self, locals_size: u32, stack_args_size: u32) -> Result<()> {
         if stack_args_size == 0 {
             self.free_stack(locals_size)?;

@@ -265,6 +265,11 @@ impl Masm for MacroAssembler {
         Ok(())
     }
 
+    fn load_processor_local(&mut self, offset: i32, dst: WritableReg) -> Result<()> {
+        self.asm.load_processor_local(offset, dst);
+        Ok(())
+    }
+
     fn frame_restore(&mut self, stack_args_size: u32) -> Result<()> {
         debug_assert_eq!(self.sp_offset, 0);
 

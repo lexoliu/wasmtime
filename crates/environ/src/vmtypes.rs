@@ -547,6 +547,19 @@ macro_rules! for_each_vm_type {
                 /// reads it.
                 #[aggregate]
                 pub interrupt_pending: AtomicBool,
+
+                /// Whether compiled code reads the store's stack limit from the executing
+                /// processor's local block (`StackLimitLocation::PerProcessor`) rather
+                /// than from `stack_limit`. Fixed for the lifetime of the store. Host-only.
+                #[aggregate]
+                pub per_processor_stack_limit: bool,
+
+                /// The processor word this store's limit is published to while its wasm
+                /// runs, or null: the word an interrupt request raises. Only the thread
+                /// running the store writes it, interrupt requesters read it. Unused
+                /// unless `per_processor_stack_limit`. Host-only.
+                #[aggregate]
+                pub processor_stack_limit: AtomicPtr<usize>,
             }
 
             /// JIT-visible representation of the store's current thread for the component

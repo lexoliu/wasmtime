@@ -1408,6 +1408,10 @@ pub(crate) trait MacroAssembler {
     /// Copy the stack pointer Winch's own stack operations use into `dst`.
     fn stack_pointer(&mut self, dst: WritableReg) -> Result<()>;
 
+    /// Load the word `offset` bytes past the executing processor's
+    /// local-block base, which the target's thread pointer holds, into `dst`.
+    fn load_processor_local(&mut self, offset: i32, dst: WritableReg) -> Result<()>;
+
     /// Emit the function epilogue.
     fn epilogue(&mut self, locals_size: u32, stack_args_size: u32) -> Result<()> {
         self.free_stack(locals_size)?;
