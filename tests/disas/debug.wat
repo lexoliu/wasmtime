@@ -132,7 +132,7 @@
 ;;       popq    %rbp
 ;;       retq
 ;;  196: movq    0x10(%rbx), %rax
-;;  19a: movq    0x148(%rax), %rax
+;;  19a: movq    0x150(%rax), %rax
 ;;  1a1: movq    %rbx, %rdi
 ;;  1a4: callq   *%rax
 ;;  1a6: ud2
@@ -147,7 +147,7 @@
 ;;       movq    8(%r10), %r11
 ;;       movq    %r11, 0x38(%r9)
 ;;       movq    0x10(%rdi), %r11
-;;       movq    0x140(%r11), %r11
+;;       movq    0x148(%r11), %r11
 ;;       movzbq  %sil, %rsi
 ;;       callq   *%r11
 ;;       movq    %rbp, %rsp
@@ -164,7 +164,7 @@
 ;;       movq    8(%r9), %r9
 ;;       movq    %r9, 0x38(%r8)
 ;;       movq    0x10(%rdi), %r9
-;;       movq    0x148(%r9), %r9
+;;       movq    0x150(%r9), %r9
 ;;       callq   *%r9
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
@@ -209,7 +209,7 @@
 ;;       movq    %r11, 0x38(%r9)
 ;;       movq    0x10(%rdi), %r12
 ;;       movq    %rdi, %r13
-;;       movq    0x170(%r12), %r11
+;;       movq    0x178(%r12), %r11
 ;;       callq   *%r11
 ;;       testb   %al, %al
 ;;       je      0x3dd
@@ -244,7 +244,7 @@
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;  3dd: movq    0x148(%r12), %rax
+;;  3dd: movq    0x150(%r12), %rax
 ;;  3e5: movq    %r13, %rdi
 ;;  3e8: callq   *%rax
 ;;  3ea: ud2

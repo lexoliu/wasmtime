@@ -135,6 +135,26 @@ macro_rules! declare_function_signatures {
 }
 wasmtime_environ::foreach_builtin_function!(declare_function_signatures);
 
+/// An explicit stack-limit check at the start of a function body: the chain
+/// of loads producing the limit, and what a failing check does.
+pub(crate) enum EntryStackCheck {
+    /// Trap with `STACK_OVERFLOW` when the stack pointer is below the limit.
+    Trap(VmctxLoadChain),
+    /// Call the `stack_limit_interrupt` builtin when the stack pointer is
+    /// below the limit (`VMStoreContext::stack_limit`, which a pending
+    /// stack-limit interruption raises to a sentinel), then resume. The
+    /// builtin delivers the interruption and traps on a real overflow.
+    Interruptible(VmctxLoadChain),
+}
+
+impl EntryStackCheck {
+    fn limit(&self) -> &VmctxLoadChain {
+        match self {
+            EntryStackCheck::Trap(limit) | EntryStackCheck::Interruptible(limit) => limit,
+        }
+    }
+}
+
 /// The `FuncEnvironment` implementation for use by the `ModuleEnvironment`.
 pub struct FuncEnvironment<'module_environment> {
     compiler: &'module_environment Compiler,
@@ -202,14 +222,14 @@ pub struct FuncEnvironment<'module_environment> {
 
     fuel_consumed: i64,
 
-    /// A stack limit for when signals-based traps are disabled.
+    /// An explicit stack-limit check emitted at the start of the body.
     ///
-    /// Typically this resides in the `stack_limit` value of `ir::Function` but
-    /// that requires signal handlers on the host and when that's disabled this
-    /// is here with an explicit check instead. Note that the explicit check is
-    /// always present even if this is a "leaf" function, as we have to call
-    /// into the host to trap when signal handlers are disabled.
-    pub(crate) stack_limit_at_function_entry: Option<VmctxLoadChain>,
+    /// Typically the check resides in the `stack_limit` value of
+    /// `ir::Function`, which the ISA prologue checks. That check traps, so it
+    /// needs signal handlers on the host, and it cannot resume. When either is
+    /// a problem the check is emitted here instead, explicitly. Note that the
+    /// explicit check is always present even if this is a "leaf" function.
+    pub(crate) stack_limit_at_function_entry: Option<EntryStackCheck>,
 
     /// Used by the stack switching feature. If set, we have a allocated a
     /// slot on this function's stack to be used for the
@@ -5271,19 +5291,18 @@ impl FuncEnvironment<'_> {
     pub fn before_translate_function(&mut self, builder: &mut FunctionBuilder) -> WasmResult<()> {
         // If an explicit stack limit is requested, emit one here at the start
         // of the function.
-        if let Some(limit) = self.stack_limit_at_function_entry.take() {
+        if let Some(check) = self.stack_limit_at_function_entry.take() {
             let vmctx = self.vmctx_val(&mut builder.cursor());
-            let limit = limit.emit(&mut builder.cursor(), vmctx);
+            let limit = check.limit().emit(&mut builder.cursor(), vmctx);
             let sp = builder.ins().get_stack_pointer(self.pointer_type());
-            if self.tunables.stack_limit_interruption {
-                // Function entries need a check of their own, not just loop
-                // headers: a tree of calls with no loops (f0 calls f1 ten
-                // times, f1 calls f2 ten times, ...) runs for time
-                // exponential in its size without reaching a back edge.
-                self.stack_limit_interrupt_branch(builder, sp, limit);
-            } else {
-                let overflow = builder.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
-                self.conditionally_trap(builder, overflow, ir::TrapCode::STACK_OVERFLOW);
+            match check {
+                EntryStackCheck::Trap(_) => {
+                    let overflow = builder.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
+                    self.conditionally_trap(builder, overflow, ir::TrapCode::STACK_OVERFLOW);
+                }
+                EntryStackCheck::Interruptible(_) => {
+                    self.stack_limit_interrupt_branch(builder, sp, limit);
+                }
             }
         }
 
