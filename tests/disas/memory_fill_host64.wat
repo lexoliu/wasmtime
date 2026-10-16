@@ -51,7 +51,7 @@
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly can_move region0 gv0+8
 ;;     gv2 = load.i64 notrap aligned region1 gv1+24
-;;     sig0 = (i64 vmctx, i64, i32, i64) tail
+;;     sig0 = (i64 vmctx, i64, i32, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;     stack_limit = gv2
 ;;
@@ -65,7 +65,7 @@
 ;; @003c                               v12 = load.i64 notrap aligned readonly can_move region2 v0+88
 ;; @003c                               v16 = iadd v12, v6
 ;; @0038                               v4 = iconst.i32 0
-;; @003c                               call fn0(v0, v16, v4, v7)  ; v4 = 0
+;; @003c                               v18 = call fn0(v0, v16, v4, v7)  ; v4 = 0
 ;; @003f                               jump block1
 ;;
 ;;                                 block1:
@@ -80,7 +80,7 @@
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly can_move region0 gv0+8
 ;;     gv2 = load.i64 notrap aligned region1 gv1+24
-;;     sig0 = (i64 vmctx, i64, i32, i64) tail
+;;     sig0 = (i64 vmctx, i64, i32, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;     stack_limit = gv2
 ;;
@@ -92,7 +92,7 @@
 ;; @0048                               v8 = load.i64 notrap aligned can_move region2 v0+104
 ;; @0048                               v11 = iadd v8, v2
 ;; @0044                               v4 = iconst.i32 0
-;; @0048                               call fn0(v0, v11, v4, v3)  ; v4 = 0
+;; @0048                               v12 = call fn0(v0, v11, v4, v3)  ; v4 = 0
 ;; @004b                               jump block1
 ;;
 ;;                                 block1:
@@ -107,7 +107,7 @@
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly can_move region0 gv0+8
 ;;     gv2 = load.i64 notrap aligned region1 gv1+24
-;;     sig0 = (i64 vmctx, i64, i32, i64) tail
+;;     sig0 = (i64 vmctx, i64, i32, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;     stack_limit = gv2
 ;;
@@ -121,7 +121,7 @@
 ;; @0054                               v12 = load.i64 notrap aligned readonly can_move region2 v0+120
 ;; @0054                               v16 = iadd v12, v6
 ;; @0050                               v4 = iconst.i32 0
-;; @0054                               call fn0(v0, v16, v4, v7)  ; v4 = 0
+;; @0054                               v18 = call fn0(v0, v16, v4, v7)  ; v4 = 0
 ;; @0057                               jump block1
 ;;
 ;;                                 block1:
@@ -136,7 +136,7 @@
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly can_move region0 gv0+8
 ;;     gv2 = load.i64 notrap aligned region1 gv1+24
-;;     sig0 = (i64 vmctx, i64, i32, i64) tail
+;;     sig0 = (i64 vmctx, i64, i32, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;     stack_limit = gv2
 ;;
@@ -148,7 +148,7 @@
 ;; @0060                               v8 = load.i64 notrap aligned can_move region2 v0+136
 ;; @0060                               v11 = iadd v8, v2
 ;; @005c                               v4 = iconst.i32 0
-;; @0060                               call fn0(v0, v11, v4, v3)  ; v4 = 0
+;; @0060                               v12 = call fn0(v0, v11, v4, v3)  ; v4 = 0
 ;; @0063                               jump block1
 ;;
 ;;                                 block1:
@@ -163,7 +163,7 @@
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly can_move region0 gv0+8
 ;;     gv2 = load.i64 notrap aligned region1 gv1+24
-;;     sig0 = (i64 vmctx, i64, i32, i64) tail
+;;     sig0 = (i64 vmctx, i64, i32, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;     stack_limit = gv2
 ;;
@@ -177,7 +177,7 @@
 ;; @006c                               v12 = load.i64 notrap aligned readonly can_move region2 v0+152
 ;; @006c                               v16 = iadd v12, v6
 ;; @0068                               v4 = iconst.i32 0
-;; @006c                               call fn0(v0, v16, v4, v7)  ; v4 = 0
+;; @006c                               v18 = call fn0(v0, v16, v4, v7)  ; v4 = 0
 ;; @006f                               jump block1
 ;;
 ;;                                 block1:

@@ -960,7 +960,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
     }
 
     /// Emits the resumable stack-limit check used by stack-limit
-    /// interruption at loop headers and between bulk-memory chunks.
+    /// interruption at loop headers.
     ///
     /// Nothing is cached across the body: the store-context pointer load is
     /// read-only and may be hoisted, but the limit itself is reloaded at
@@ -4372,15 +4372,12 @@ impl FuncEnvironment<'_> {
             }
         }
 
-        if self.tunables.stack_limit_interruption {
-            self.stack_limit_interrupt_check(builder);
-        }
-
         let mut pos = builder.cursor();
         let vmctx = self.vmctx_val(&mut pos);
 
         // Performs a raw call to the actual libcall, as dictated by the
-        // provided `op`.
+        // provided `op`. Stack-limit interruption needs no check here: the
+        // libcall delivers a request between chunks itself.
         match op {
             BulkOp::MemoryCopy { dst, src, len, .. } => {
                 let memory_copy = self.builtin_functions.memory_copy(&mut builder.func);
