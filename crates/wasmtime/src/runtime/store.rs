@@ -457,8 +457,8 @@ pub struct StoreInterruptHandle {
 impl StoreInterruptHandle {
     /// Requests that the store's guest be interrupted.
     ///
-    /// The guest observes the request at its next function entry, loop
-    /// header or bulk-memory chunk, and runs the store's
+    /// The guest observes the request at its next entry into a function
+    /// that calls wasm, loop header or bulk-memory chunk, and runs the store's
     /// [`Store::interrupt_callback`] there. A request made while the store
     /// runs host code, or while its guest is suspended on a fiber, is
     /// delivered when the guest next runs one of those checks. Requests made

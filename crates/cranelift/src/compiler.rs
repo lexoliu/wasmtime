@@ -1,7 +1,7 @@
 use crate::TRAP_INTERNAL_ASSERT;
 use crate::alias_region::AliasRegions;
 use crate::debug::DwarfSectionRelocTarget;
-use crate::func_environ::FuncEnvironment;
+use crate::func_environ::{EntryStackCheck, FuncEnvironment};
 use crate::translate::{FuncTranslator, VmctxLoadChain};
 use crate::{BuiltinFunctionSignatures, builder::LinkOptions, wasm_call_signature};
 use crate::{CompiledFunction, ModuleTextBuilder, array_call_signature};
@@ -34,7 +34,7 @@ use std::mem;
 use std::ops::Range;
 use std::path;
 use std::sync::{Arc, Mutex};
-use wasmparser::{FuncValidatorAllocations, FunctionBody};
+use wasmparser::{FuncValidatorAllocations, FunctionBody, Operator};
 use wasmtime_environ::error::{Context as _, Result};
 use wasmtime_environ::obj::{ELF_WASMTIME_EXCEPTIONS, ELF_WASMTIME_FRAMES};
 use wasmtime_environ::{
@@ -43,7 +43,7 @@ use wasmtime_environ::{
     FrameTableBuilder, FuncKey, FunctionBodyData, FunctionLoc, GetPtrSize, HostCall,
     InliningCompiler, ModulePC, ModuleStartup, ModuleTranslation, ModuleTypesBuilder,
     StackMapSection, StaticModuleIndex, TrapEncodingBuilder, TrapSentinel, TripleExt, Tunables,
-    WasmFuncType, WasmValType, prelude::*,
+    WasmError, WasmFuncType, WasmValType, prelude::*,
 };
 use wasmtime_unwinder::ExceptionTableBuilder;
 
@@ -462,6 +462,32 @@ fn box_dyn_any(x: impl Any + Send + Sync) -> Box<dyn Any + Send + Sync> {
     b
 }
 
+/// Whether `body` contains an operator that runs another wasm function on
+/// top of its own frame: a direct, indirect or reference call, their tail
+/// forms, or a continuation resume or switch.
+///
+/// Libcalls (`memory.grow`, bulk memory, GC allocation, ...) are not counted:
+/// they are host calls that return without running wasm. Throwing is not
+/// counted either: it unwinds to a frame already on the stack.
+fn calls_wasm(body: &FunctionBody<'_>) -> Result<bool, WasmError> {
+    let mut reader = body.get_operators_reader()?;
+    while !reader.eof() {
+        match reader.read()? {
+            Operator::Call { .. }
+            | Operator::CallIndirect { .. }
+            | Operator::CallRef { .. }
+            | Operator::ReturnCall { .. }
+            | Operator::ReturnCallIndirect { .. }
+            | Operator::ReturnCallRef { .. }
+            | Operator::Resume { .. }
+            | Operator::ResumeThrow { .. }
+            | Operator::Switch { .. } => return Ok(true),
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
 impl wasmtime_environ::Compiler for Compiler {
     fn inlining_compiler(&self) -> Option<&dyn wasmtime_environ::InliningCompiler> {
         Some(self)
@@ -547,24 +573,44 @@ impl wasmtime_environ::Compiler for Compiler {
         // abort for the whole program since the runtime limits configured by
         // the embedder should cause wasm to trap before it reaches that
         // (ensuring the host has enough space as well for its functionality).
+        //
+        // Stack-limit interruption raises `VMStoreContext::stack_limit` to a
+        // sentinel that fails every check, and a failed check must then
+        // resume after delivering the interruption, which the ISA prologue
+        // check (a trap) cannot do. Only functions that call wasm need such
+        // a check at entry: a tree of calls with no loops (f0 calls f1 ten
+        // times, f1 calls f2 ten times, ...) runs for time exponential in
+        // its size without reaching a back edge, so the calls themselves are
+        // where it must be interruptible. A function that calls no wasm runs
+        // for bounded time except through its loops, whose headers carry the
+        // resumable check, so it needs only an overflow check, and that one
+        // compares against `VMStoreContext::real_stack_limit`, which never
+        // holds the sentinel. Through the ISA prologue it is skipped for a
+        // leaf with no frame, keeping such a leaf free of any call.
         if !isa.triple().is_pulley() {
+            let interruptible_entry = self.tunables.stack_limit_interruption && calls_wasm(&body)?;
             let store_ctx = func_env
                 .alias_regions
                 .vmctx_store_context_load(&mut context.func);
-            let stack_limit = func_env
-                .alias_regions
-                .vmstore_context_stack_limit_load(&mut context.func);
+            let stack_limit = if self.tunables.stack_limit_interruption && !interruptible_entry {
+                func_env
+                    .alias_regions
+                    .vmstore_context_real_stack_limit_load(&mut context.func)
+            } else {
+                func_env
+                    .alias_regions
+                    .vmstore_context_stack_limit_load(&mut context.func)
+            };
             let stack_limit = VmctxLoadChain::new([store_ctx, stack_limit].into());
-            // Stack-limit interruption raises this limit to a sentinel and
-            // needs the failed check to resume, which the ISA-level prologue
-            // check (a trap) cannot do: use the explicit check, which
-            // `before_translate_function` makes resumable.
-            if self.tunables.signals_based_traps && !self.tunables.stack_limit_interruption {
+            func_env.stack_limit_at_function_entry = if interruptible_entry {
+                Some(EntryStackCheck::Interruptible(stack_limit))
+            } else if self.tunables.signals_based_traps {
                 let stack_limit = stack_limit.emit_global(&mut context.func);
                 context.func.stack_limit = Some(stack_limit);
+                None
             } else {
-                func_env.stack_limit_at_function_entry = Some(stack_limit);
-            }
+                Some(EntryStackCheck::Trap(stack_limit))
+            };
         }
         let mut validator =
             validator.into_validator(mem::take(&mut compiler.cx.validator_allocations));

@@ -18,7 +18,7 @@
 ;;     region4 = 738197512 "VMComponentContext+0x8"
 ;;     region5 = 1879048208 "ComponentBuiltinFunctionsArray+0x10"
 ;;     region6 = 16 "VMContext+0x10"
-;;     region7 = 1811939656 "BuiltinFunctionsArray+0x148"
+;;     region7 = 1811939664 "BuiltinFunctionsArray+0x150"
 ;;     sig0 = (i64 sext, i32 sext, i32 sext, i32 sext) -> i64 sext system_v
 ;;     sig1 = (i64 sext vmctx) system_v
 ;;
@@ -40,7 +40,7 @@
 ;;
 ;; block1 cold:
 ;;     v14 = load.i64 notrap aligned readonly can_move region6 v1+16
-;;     v15 = load.i64 notrap aligned readonly can_move region7 v14+328
+;;     v15 = load.i64 notrap aligned readonly can_move region7 v14+336
 ;;     call_indirect sig1, v15(v1)
 ;;     trap user1
 ;;

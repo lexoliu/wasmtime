@@ -351,6 +351,10 @@ wasmtime_option_group! {
         /// Yield when a global epoch counter changes, allowing for async
         /// operation without blocking the executor.
         pub epoch_interruption: Option<bool>,
+        /// Interrupt guest code through the store's stack limit: a requested
+        /// interruption fails the next stack-limit check, which resumes after
+        /// running the store's interrupt callback.
+        pub stack_limit_interruption: Option<bool>,
         /// Maximum stack size, in bytes, that wasm is allowed to consume before a
         /// stack overflow is reported.
         pub max_wasm_stack: Option<usize>,
@@ -1006,6 +1010,9 @@ impl CommonOptions {
         if let Some(enable) = self.wasm.epoch_interruption {
             config.epoch_interruption(enable);
         }
+        if let Some(enable) = self.wasm.stack_limit_interruption {
+            config.stack_limit_interruption(enable);
+        }
         if let Some(enable) = self.debug.address_map {
             config.generate_address_map(enable);
         }
@@ -1478,6 +1485,7 @@ impl CommonOptions {
                 wide_arithmetic: Some(features.contains(WasmFeatures::WIDE_ARITHMETIC)),
                 concurrency_support: Some(engine.get_concurrency_support()),
                 epoch_interruption: Some(engine.get_epoch_interruption()),
+                stack_limit_interruption: Some(engine.get_stack_limit_interruption()),
                 fuel: if engine.get_consume_fuel() {
                     Some(1)
                 } else {
