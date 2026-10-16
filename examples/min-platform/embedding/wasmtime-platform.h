@@ -17,6 +17,7 @@
 // * `WASMTIME_SIGNALS_BASED_TRAPS` - corresponds to `signals-based-traps`
 // * `WASMTIME_CUSTOM_SYNC` - corresponds to `custom-sync-primitives`
 // * `WASMTIME_CUSTOM_FIBER` - corresponds to `custom-fiber`
+// * `WASMTIME_PROCESSOR_STACK_LIMIT` - corresponds to `custom-processor-stack-limit`
 //
 // Some more information about this header can additionally be found at
 // <https://docs.wasmtime.dev/stability-platform-support.html>.
@@ -269,9 +270,11 @@ extern void wasmtime_tls_set(uintptr_t slot, uint8_t *ptr);
  * whichever processor calls it, and the word must stay valid for as long
  * as the processor runs wasm. Wasmtime accesses the word only with
  * pointer-sized atomics. It is called only by engines configured that
- * way; an embedding that never configures it may abort here.
+ * way.
  */
+#if defined(WASMTIME_PROCESSOR_STACK_LIMIT)
 extern uintptr_t *wasmtime_processor_stack_limit(void);
+#endif
 
 #if defined(WASMTIME_CUSTOM_SYNC)
 /**
