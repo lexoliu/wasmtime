@@ -1296,6 +1296,7 @@ where
         }
         Opcode::GetFramePointer => unimplemented!("GetFramePointer"),
         Opcode::GetStackPointer => unimplemented!("GetStackPointer"),
+        Opcode::LoadProcessorLocal => unimplemented!("LoadProcessorLocal"),
         Opcode::GetReturnAddress => unimplemented!("GetReturnAddress"),
         Opcode::X86Pshufb => unimplemented!("X86Pshufb"),
         Opcode::Blendv => unimplemented!("Blendv"),

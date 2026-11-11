@@ -10,6 +10,10 @@
 #![deny(missing_docs)]
 #![warn(clippy::cast_sign_loss)]
 #![no_std]
+// `for_each_vm_type!`'s consumers peel each `VM*` struct body one token at a
+// time, so their expansion depth grows with the largest struct
+// (`VMStoreContext`), past rustc's default limit of 128.
+#![recursion_limit = "256"]
 
 #[cfg(any(feature = "std", test))]
 #[macro_use]

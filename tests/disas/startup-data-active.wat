@@ -46,7 +46,7 @@
 ;;     region1 = 120 "VMContext+0x78"
 ;;     region2 = 603979784 "VMMemoryDefinition+0x8"
 ;;     region3 = 603979776 "VMMemoryDefinition+0x0"
-;;     sig0 = (i64 vmctx, i64, i64, i64) tail
+;;     sig0 = (i64 vmctx, i64, i64, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:1 sig0
 ;;
 ;; block0(v0: i64, v1: i64):
@@ -62,7 +62,7 @@
 ;;     v14 = icmp ugt v10, v8
 ;;     trapnz v14, heap_oob
 ;;     v15 = load.i64 notrap aligned readonly can_move region3 v0+56
-;;     call fn0(v0, v15, v2, v10)
+;;     v34 = call fn0(v0, v15, v2, v10)
 ;;     jump block2
 ;;
 ;; block2:

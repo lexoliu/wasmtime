@@ -317,8 +317,13 @@ macro_rules! for_each_vm_type {
                 /// supported target.
                 ///
                 /// Host code never writes it directly: every writer goes through
-                /// [`VMStoreContext::replace_stack_limit`] or
+                /// [`VMStoreContext::enter_stack_limit`],
+                /// [`VMStoreContext::leave_stack_limit`] or
                 /// [`VMStoreContext::take_interrupt`], which consult `interrupt_pending`.
+                ///
+                /// With `StackLimitLocation::PerProcessor` compiled code reads the
+                /// executing processor's word instead (see `processor_stack_limit`), and
+                /// this field is unused.
                 ///
                 /// For more information see `crates/cranelift/src/lib.rs`.
                 pub stack_limit: AtomicUsize,
@@ -443,6 +448,17 @@ macro_rules! for_each_vm_type {
                 /// the `stack_limit_interrupt` builtin. Host-only; compiled code never
                 /// reads it.
                 pub interrupt_pending: AtomicBool,
+
+                /// Whether compiled code reads this store's limit from the executing
+                /// processor's word (`StackLimitLocation::PerProcessor`) rather than from
+                /// `stack_limit`. Fixed when the store is created. Host-only.
+                pub per_processor_stack_limit: bool,
+
+                /// The processor word this store's limit is published to while its wasm
+                /// runs, or null: the word an interrupt request raises. Only the thread
+                /// running the store writes it, interrupt requesters read it. Unused
+                /// unless `per_processor_stack_limit`. Host-only.
+                pub processor_stack_limit: AtomicPtr<usize>,
             }
 
             /// JIT-visible representation of the store's current thread for the component

@@ -913,6 +913,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
     fn compute_frame_layout(
         call_conv: CallConv,
         flags: &settings::Flags,
+        _isa_flags: &Self::F,
         _sig: &Signature,
         regs: &[Writable<RealReg>],
         function_calls: FunctionCalls,

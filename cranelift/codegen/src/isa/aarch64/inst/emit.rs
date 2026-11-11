@@ -1393,6 +1393,19 @@ impl MachInstEmit for Inst {
                 let size = OperandSize::Size64;
                 Inst::Mov { size, rd, rm }.emit(sink, emit_info, state);
             }
+            &Inst::LoadProcessorLocal { rd, offset } => {
+                // mrs rd, tpidr_el1 (op0=3, op1=0, CRn=13, CRm=0, op2=4).
+                sink.put4(0xd538_d080 | machreg_to_gpr(rd.to_reg()));
+                Inst::ULoad64 {
+                    rd,
+                    mem: AMode::RegOffset {
+                        rn: rd.to_reg(),
+                        off: i64::from(offset),
+                    },
+                    flags: MemFlagsData::trusted(),
+                }
+                .emit(sink, emit_info, state);
+            }
             &Inst::MovToPReg { rd, rm } => {
                 let rd: Writable<Reg> = Writable::from_reg(rd.into());
                 debug_assert!(

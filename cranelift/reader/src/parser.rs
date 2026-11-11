@@ -2930,6 +2930,10 @@ impl<'a> Parser<'a> {
                     offset,
                 }
             }
+            InstructionFormat::LoadProcessorLocal => {
+                let offset = self.optional_offset32()?;
+                InstructionData::LoadProcessorLocal { opcode, offset }
+            }
             InstructionFormat::DynamicStackAddr => {
                 let dss = self.match_dss("expected dynamic stack slot number: dss«n»")?;
                 ctx.check_dss(dss, self.loc)?;

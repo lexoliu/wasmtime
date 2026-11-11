@@ -1,0 +1,107 @@
+test compile precise-output
+set opt_level=speed
+set unwind_info=false
+target x86_64
+
+;; Wasmtime's loop-header check: neither the processor-local limit (a load
+;; that may not move) nor the stack pointer (rematerialized per block) is
+;; hoisted out of the loop, so the hot path keeps no register for either and
+;; the cold block reads the stack pointer itself.
+function %loop_check(i64, i32) {
+    fn0 = colocated %interrupt(i64, i64)
+
+block0(v0: i64, v1: i32):
+    jump block1(v1)
+
+block1(v2: i32):
+    v3 = get_stack_pointer.i64
+    v4 = load_processor_local.i64 +16
+    v5 = icmp ult v3, v4
+    brif v5, block2, block3
+
+block2 cold:
+    call fn0(v0, v3)
+    jump block3
+
+block3:
+    v6 = iconst.i32 1
+    v7 = isub v2, v6
+    brif v7, block1(v7), block4
+
+block4:
+    return
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x10, %rsp
+;   movq %r12, (%rsp)
+;   movq %r13, 8(%rsp)
+; block0:
+;   movq %rsi, %r12
+;   movq %rdi, %r13
+;   jmp     label1
+; block1:
+;   cmpq    %fs:16, %rsp
+;   jb      label3; j label2
+; block2:
+;   movq %r12, %rsi
+;   jmp     label4
+; block4:
+;   subl $0x1, %esi
+;   testl %esi, %esi
+;   jnz     label5; j label6
+; block5:
+;   movq %rsi, %r12
+;   jmp     label1
+; block6:
+;   movq (%rsp), %r12
+;   movq 8(%rsp), %r13
+;   addq $0x10, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block3:
+;   movq    %rsp, %rsi
+;   movq %r13, %rdi
+;   call    TestCase(%interrupt)
+;   movq %r12, %rsi
+;   jmp     label4
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x10, %rsp
+;   movq %r12, (%rsp)
+;   movq %r13, 8(%rsp)
+; block1: ; offset 0x11
+;   movq %rsi, %r12
+;   movq %rdi, %r13
+; block2: ; offset 0x17
+;   cmpq %fs:0x10, %rsp
+;   jb 0x4e
+; block3: ; offset 0x26
+;   movq %r12, %rsi
+; block4: ; offset 0x29
+;   subl $1, %esi
+;   testl %esi, %esi
+;   je 0x3c
+; block5: ; offset 0x34
+;   movq %rsi, %r12
+;   jmp 0x17
+; block6: ; offset 0x3c
+;   movq (%rsp), %r12
+;   movq 8(%rsp), %r13
+;   addq $0x10, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+; block7: ; offset 0x4e
+;   movq %rsp, %rsi
+;   movq %r13, %rdi
+;   callq 0x59 ; reloc_external CallPCRel4 %interrupt -4
+;   movq %r12, %rsi
+;   jmp 0x29
+

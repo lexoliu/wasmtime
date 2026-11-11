@@ -18,7 +18,7 @@
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly can_move region0 gv0+8
 ;;     gv2 = load.i64 notrap aligned region1 gv1+24
-;;     sig0 = (i64 vmctx, i64, i64, i64) tail
+;;     sig0 = (i64 vmctx, i64, i64, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:1 sig0
 ;;     stack_limit = gv2
 ;;
@@ -50,21 +50,21 @@
 ;; @002b                               v63 = load.i64 notrap aligned region3 v8+40
 ;; @002b                               v25 = iconst.i64 24
 ;; @002b                               v26 = iadd v10, v25  ; v25 = 24
-;;                                     v76 = iconst.i64 3
-;;                                     v77 = ishl v15, v76  ; v76 = 3
-;; @002b                               v30 = iadd v26, v77
-;;                                     v81 = ishl v16, v76  ; v76 = 3
-;; @002b                               v65 = uadd_overflow_trap v30, v81, user2
+;;                                     v77 = iconst.i64 3
+;;                                     v78 = ishl v15, v77  ; v77 = 3
+;; @002b                               v30 = iadd v26, v78
+;;                                     v82 = ishl v16, v77  ; v77 = 3
+;; @002b                               v65 = uadd_overflow_trap v30, v82, user2
 ;; @002b                               v64 = iadd v9, v63
 ;; @002b                               v66 = icmp ugt v65, v64
 ;; @002b                               trapnz v66, user2
 ;; @002b                               v50 = iadd v34, v25  ; v25 = 24
-;;                                     v79 = ishl v39, v76  ; v76 = 3
-;; @002b                               v54 = iadd v50, v79
-;; @002b                               v72 = uadd_overflow_trap v54, v81, user2
+;;                                     v80 = ishl v39, v77  ; v77 = 3
+;; @002b                               v54 = iadd v50, v80
+;; @002b                               v72 = uadd_overflow_trap v54, v82, user2
 ;; @002b                               v73 = icmp ugt v72, v64
 ;; @002b                               trapnz v73, user2
-;; @002b                               call fn0(v0, v30, v54, v81)
+;; @002b                               v74 = call fn0(v0, v30, v54, v82)
 ;; @002f                               jump block1
 ;;
 ;;                                 block1:

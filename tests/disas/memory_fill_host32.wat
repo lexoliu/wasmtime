@@ -49,7 +49,7 @@
 ;; function u0:0(i32 vmctx, i32, i32, i32) tail {
 ;;     region0 = 603979776 "VMMemoryDefinition+0x0"
 ;;     region1 = 603979780 "VMMemoryDefinition+0x4"
-;;     sig0 = (i32 vmctx, i32, i32, i32) tail
+;;     sig0 = (i32 vmctx, i32, i32, i32) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;
 ;;                                 block0(v0: i32, v1: i32, v2: i32, v3: i32):
@@ -63,7 +63,7 @@
 ;; @003c                               v13 = load.i32 notrap aligned can_move region0 v0+44
 ;; @003c                               v16 = iadd v13, v2
 ;; @0038                               v4 = iconst.i32 0
-;; @003c                               call fn0(v0, v16, v4, v3)  ; v4 = 0
+;; @003c                               v17 = call fn0(v0, v16, v4, v3)  ; v4 = 0
 ;; @003f                               jump block1
 ;;
 ;;                                 block1:
@@ -73,7 +73,7 @@
 ;; function u0:1(i32 vmctx, i32, i64, i64) tail {
 ;;     region0 = 603979776 "VMMemoryDefinition+0x0"
 ;;     region1 = 603979780 "VMMemoryDefinition+0x4"
-;;     sig0 = (i32 vmctx, i32, i32, i32) tail
+;;     sig0 = (i32 vmctx, i32, i32, i32) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;
 ;;                                 block0(v0: i32, v1: i32, v2: i64, v3: i64):
@@ -87,7 +87,7 @@
 ;; @0048                               v13 = iadd v9, v10
 ;; @0044                               v4 = iconst.i32 0
 ;; @0048                               v14 = ireduce.i32 v3
-;; @0048                               call fn0(v0, v13, v4, v14)  ; v4 = 0
+;; @0048                               v15 = call fn0(v0, v13, v4, v14)  ; v4 = 0
 ;; @004b                               jump block1
 ;;
 ;;                                 block1:
@@ -97,7 +97,7 @@
 ;; function u0:2(i32 vmctx, i32, i32, i32) tail {
 ;;     region0 = 603979776 "VMMemoryDefinition+0x0"
 ;;     region1 = 603979780 "VMMemoryDefinition+0x4"
-;;     sig0 = (i32 vmctx, i32, i32, i32) tail
+;;     sig0 = (i32 vmctx, i32, i32, i32) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;
 ;;                                 block0(v0: i32, v1: i32, v2: i32, v3: i32):
@@ -111,7 +111,7 @@
 ;; @0054                               v13 = load.i32 notrap aligned can_move region0 v0+60
 ;; @0054                               v16 = iadd v13, v2
 ;; @0050                               v4 = iconst.i32 0
-;; @0054                               call fn0(v0, v16, v4, v3)  ; v4 = 0
+;; @0054                               v17 = call fn0(v0, v16, v4, v3)  ; v4 = 0
 ;; @0057                               jump block1
 ;;
 ;;                                 block1:
@@ -121,7 +121,7 @@
 ;; function u0:3(i32 vmctx, i32, i64, i64) tail {
 ;;     region0 = 603979776 "VMMemoryDefinition+0x0"
 ;;     region1 = 603979780 "VMMemoryDefinition+0x4"
-;;     sig0 = (i32 vmctx, i32, i32, i32) tail
+;;     sig0 = (i32 vmctx, i32, i32, i32) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;
 ;;                                 block0(v0: i32, v1: i32, v2: i64, v3: i64):
@@ -135,7 +135,7 @@
 ;; @0060                               v13 = iadd v9, v10
 ;; @005c                               v4 = iconst.i32 0
 ;; @0060                               v14 = ireduce.i32 v3
-;; @0060                               call fn0(v0, v13, v4, v14)  ; v4 = 0
+;; @0060                               v15 = call fn0(v0, v13, v4, v14)  ; v4 = 0
 ;; @0063                               jump block1
 ;;
 ;;                                 block1:
@@ -145,7 +145,7 @@
 ;; function u0:4(i32 vmctx, i32, i32, i32) tail {
 ;;     region0 = 603979776 "VMMemoryDefinition+0x0"
 ;;     region1 = 603979780 "VMMemoryDefinition+0x4"
-;;     sig0 = (i32 vmctx, i32, i32, i32) tail
+;;     sig0 = (i32 vmctx, i32, i32, i32) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;
 ;;                                 block0(v0: i32, v1: i32, v2: i32, v3: i32):
@@ -159,7 +159,7 @@
 ;; @006c                               v13 = load.i32 notrap aligned readonly can_move region0 v0+76
 ;; @006c                               v16 = iadd v13, v2
 ;; @0068                               v4 = iconst.i32 0
-;; @006c                               call fn0(v0, v16, v4, v3)  ; v4 = 0
+;; @006c                               v17 = call fn0(v0, v16, v4, v3)  ; v4 = 0
 ;; @006f                               jump block1
 ;;
 ;;                                 block1:

@@ -1300,6 +1300,33 @@ pub(crate) fn define(
 
     ig.push(
         Inst::new(
+            "load_processor_local",
+            r#"
+        Load a word from the executing processor's local block.
+
+        The block is the one the target's processor anchor addresses: the
+        `fs` segment base on x86-64, `tpidr_el1` on AArch64 and `tp` on
+        RISC-V 64, as kept by a kernel that runs this code in its own
+        privilege level and points the anchor at a per-processor block.
+        ``Offset`` is the word's byte offset in that block, and the load is an
+        ordinary, aligned, non-trapping one.
+
+        The executing processor can change wherever control can leave the
+        function, so the instruction reads memory every time it executes: it
+        is neither merged with another nor moved out of a loop.
+        "#,
+            &formats.load_processor_local,
+        )
+        .operands_in(vec![
+            Operand::new("Offset", &imm.offset32)
+                .with_doc("Byte offset from the processor's local block"),
+        ])
+        .operands_out(vec![Operand::new("a", iAddr).with_doc("Value loaded")])
+        .can_load(),
+    );
+
+    ig.push(
+        Inst::new(
             "get_return_address",
             r#"
         Get the PC where this function will transfer control to when it returns.

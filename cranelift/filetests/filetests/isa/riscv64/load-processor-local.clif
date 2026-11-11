@@ -1,0 +1,166 @@
+test compile precise-output
+set unwind_info=false
+target riscv64
+
+function %load_processor_local() -> i64 {
+block0:
+    v0 = load_processor_local.i64 +16
+    return v0
+}
+
+; VCode:
+; block0:
+;   ld a0,16(tp)
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   ld a0, 0x10(tp)
+;   ret
+
+function %load_processor_local_zero_offset() -> i64 {
+block0:
+    v0 = load_processor_local.i64
+    return v0
+}
+
+; VCode:
+; block0:
+;   ld a0,0(tp)
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   ld a0, 0(tp)
+;   ret
+
+;; A stack-limit check against the processor's local block, as Wasmtime
+;; emits it at a loop header: the loaded limit's only use is the compare.
+function %stack_limit_check(i64) {
+    fn0 = colocated %interrupt(i64, i64)
+
+block0(v0: i64):
+    v1 = get_stack_pointer.i64
+    v2 = load_processor_local.i64 +16
+    v3 = icmp ult v1, v2
+    brif v3, block1, block2
+
+block1 cold:
+    call fn0(v0, v1)
+    jump block2
+
+block2:
+    return
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+; block0:
+;   mv a1,sp
+;   ld a2,16(tp)
+;   bltu a1,a2,taken(label2),not_taken(label1)
+; block1:
+;   j label3
+; block3:
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+; block2:
+;   call %interrupt
+;   j label3
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+; block1: ; offset 0x10
+;   mv a1, sp
+;   ld a2, 0x10(tp)
+;   bltu a1, a2, 0x14
+; block2: ; offset 0x1c
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+; block3: ; offset 0x2c
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %interrupt 0
+;   jalr ra
+;   j -0x18
+
+;; A limit used twice cannot be folded into the compare.
+function %stack_limit_check_reused(i64) -> i64 {
+    fn0 = colocated %interrupt(i64, i64)
+
+block0(v0: i64):
+    v1 = get_stack_pointer.i64
+    v2 = load_processor_local.i64 +16
+    v3 = icmp ult v1, v2
+    brif v3, block1, block2
+
+block1 cold:
+    call fn0(v0, v1)
+    jump block2
+
+block2:
+    return v2
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   addi sp,sp,-16
+;   sd s1,8(sp)
+; block0:
+;   mv a1,sp
+;   ld s1,16(tp)
+;   bltu a1,s1,taken(label2),not_taken(label1)
+; block1:
+;   mv a0,s1
+;   j label3
+; block3:
+;   ld s1,8(sp)
+;   addi sp,sp,16
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+; block2:
+;   call %interrupt
+;   mv a0,s1
+;   j label3
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   addi sp, sp, -0x10
+;   sd s1, 8(sp)
+; block1: ; offset 0x18
+;   mv a1, sp
+;   ld s1, 0x10(tp)
+;   bltu a1, s1, 0x20
+; block2: ; offset 0x24
+;   mv a0, s1
+; block3: ; offset 0x28
+;   ld s1, 8(sp)
+;   addi sp, sp, 0x10
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+; block4: ; offset 0x40
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %interrupt 0
+;   jalr ra
+;   mv a0, s1
+;   j -0x24
+

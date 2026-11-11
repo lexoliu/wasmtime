@@ -1221,6 +1221,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
     fn compute_frame_layout(
         call_conv: isa::CallConv,
         flags: &settings::Flags,
+        _isa_flags: &Self::F,
         sig: &Signature,
         regs: &[Writable<RealReg>],
         function_calls: FunctionCalls,

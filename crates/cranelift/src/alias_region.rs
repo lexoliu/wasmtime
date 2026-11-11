@@ -562,6 +562,8 @@ macro_rules! define_vm_type_alias_region_helpers {
     (@field_ty $pt:expr, Option < VmPtr < $g:ty >>) => { $pt };
     (@field_ty $pt:expr, AtomicUsize) => { $pt };
     (@field_ty $pt:expr, AtomicBool) => { ir::types::I8 };
+    (@field_ty $pt:expr, AtomicPtr < $g:ty >) => { $pt };
+    (@field_ty $pt:expr, bool) => { ir::types::I8 };
     (@field_ty $pt:expr, usize) => { $pt };
     (@field_ty $pt:expr, i64) => { ir::types::I64 };
     (@field_ty $pt:expr, u64) => { ir::types::I64 };

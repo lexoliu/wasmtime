@@ -108,6 +108,10 @@ define_tunables! {
         /// instead, which an interruption never raises.
         pub stack_limit_interruption: bool,
 
+        /// Where the stack limit that `stack_limit_interruption` compares
+        /// against lives. Ignored unless `stack_limit_interruption` is set.
+        pub stack_limit_location: StackLimitLocation,
+
         /// Whether or not linear memories are allowed to be reallocated after
         /// initial allocation at runtime.
         pub memory_may_move: bool,
@@ -272,6 +276,7 @@ impl Tunables {
             operator_cost: OperatorCostStrategy::Default,
             epoch_interruption: false,
             stack_limit_interruption: false,
+            stack_limit_location: StackLimitLocation::StoreContext,
             memory_may_move: true,
             guard_before_linear_memory: true,
             table_lazy_init: true,
@@ -454,6 +459,62 @@ impl fmt::Display for Collector {
             Collector::DeferredReferenceCounting => write!(f, "deferred reference-counting"),
             Collector::Null => write!(f, "null"),
             Collector::Copying => write!(f, "copying"),
+        }
+    }
+}
+
+/// Where compiled code finds the stack limit that
+/// [`Tunables::stack_limit_interruption`] checks compare the stack pointer
+/// with.
+#[derive(Clone, Copy, Hash, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum StackLimitLocation {
+    /// The limit is `VMStoreContext::stack_limit`, reached through the
+    /// function's `vmctx`: every check loads the store-context pointer and
+    /// then the limit.
+    StoreContext,
+
+    /// The limit is a word in the executing processor's local block, `offset`
+    /// bytes past the base the target's thread pointer holds: `fs` on x86-64,
+    /// `tpidr_el1` on AArch64, `tp` on RISC-V 64. Every check is one load from
+    /// that base, or on x86-64 one `cmp` with the stack pointer, and keeps no
+    /// value live across the function body.
+    ///
+    /// The embedder owns the block. It answers
+    /// `wasmtime_processor_stack_limit` with the address of the executing
+    /// processor's word, and the runtime publishes the running store's limit
+    /// there whenever wasm starts or resumes on a processor.
+    PerProcessor {
+        /// Byte offset of the limit word from the thread-pointer base. It
+        /// must be a multiple of the pointer size.
+        offset: i32,
+    },
+}
+
+impl FromStr for StackLimitLocation {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "store" {
+            return Ok(Self::StoreContext);
+        }
+        if let Some(offset) = s.strip_prefix("processor:") {
+            let offset = offset.parse().map_err(|error| {
+                format_err!("invalid per-processor stack limit offset `{offset}`: {error}")
+            })?;
+            return Ok(Self::PerProcessor { offset });
+        }
+        bail!(
+            "invalid stack limit location: `{s}`, only `store` and \
+             `processor:<offset>` accepted"
+        )
+    }
+}
+
+impl fmt::Display for StackLimitLocation {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            StackLimitLocation::StoreContext => write!(f, "store"),
+            StackLimitLocation::PerProcessor { offset } => write!(f, "processor:{offset}"),
         }
     }
 }

@@ -45,11 +45,16 @@ fn main() {
         && cfg!(feature = "custom-sync-primitives")
         && cfg!(feature = "runtime");
     let has_custom_fiber = !has_builtin_stackswitch && cfg!(feature = "custom-fiber");
+    let has_processor_stack_limit = !miri
+        && !cfg!(feature = "std")
+        && cfg!(feature = "custom-processor-stack-limit")
+        && cfg!(feature = "runtime");
 
     custom_cfg("has_native_signals", has_native_signals);
     custom_cfg("has_virtual_memory", has_virtual_memory);
     custom_cfg("has_custom_fiber", has_custom_fiber);
     custom_cfg("has_custom_sync", has_custom_sync);
+    custom_cfg("has_processor_stack_limit", has_processor_stack_limit);
     custom_cfg("has_host_compiler_backend", has_host_compiler_backend);
     custom_cfg("gc_zeal", cfg("fuzzing"));
 

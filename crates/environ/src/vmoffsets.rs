@@ -82,6 +82,8 @@ macro_rules! define_vm_type_offsets {
     (@size ($p:expr) Option < VmPtr < $g:ty >>) => { u32::from($p) };
     (@size ($p:expr) AtomicUsize) => { u32::from($p) };
     (@size ($p:expr) AtomicBool) => { 1u32 };
+    (@size ($p:expr) AtomicPtr < $g:ty >) => { u32::from($p) };
+    (@size ($p:expr) bool) => { 1u32 };
     (@size ($p:expr) usize) => { u32::from($p) };
     (@size ($p:expr) i64) => { 8u32 };
     (@size ($p:expr) u64) => { 8u32 };
@@ -120,6 +122,8 @@ macro_rules! define_vm_type_offsets {
     (@align ($p:expr) Option < VmPtr < $g:ty >>) => { u32::from($p) };
     (@align ($p:expr) AtomicUsize) => { u32::from($p) };
     (@align ($p:expr) AtomicBool) => { 1u32 };
+    (@align ($p:expr) AtomicPtr < $g:ty >) => { u32::from($p) };
+    (@align ($p:expr) bool) => { 1u32 };
     (@align ($p:expr) usize) => { u32::from($p) };
     (@align ($p:expr) i64) => { 8u32 };
     (@align ($p:expr) u64) => { 8u32 };

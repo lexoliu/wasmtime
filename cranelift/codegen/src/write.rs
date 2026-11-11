@@ -506,6 +506,14 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
         DynamicStackAddr {
             dynamic_stack_slot, ..
         } => write!(w, " {dynamic_stack_slot}"),
+        LoadProcessorLocal { offset, .. } => {
+            // A zero offset displays as nothing, like a load's.
+            if i32::from(offset) == 0 {
+                Ok(())
+            } else {
+                write!(w, " {offset}")
+            }
+        }
         Load {
             flags, arg, offset, ..
         } => write!(w, "{} {arg}{offset}", dfg.mem_flags[flags]),

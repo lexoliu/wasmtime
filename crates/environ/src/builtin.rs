@@ -1,3 +1,18 @@
+/// The largest number of bytes a bulk-memory operation (`memory.copy`,
+/// `memory.fill`) moves without giving stack-limit interruption a chance to
+/// stop it.
+///
+/// Very scientifically chosen. Or, more seriously, this is just an arbitrary
+/// number for now. 100k copies of this size locally takes half a second, so
+/// seems like a reasonably large chunk size to not hit perf too much by
+/// chunking but also enable time slicing.
+///
+/// The `memory_copy` and `memory_fill` libcalls split the operation into
+/// runs of at most this many bytes for stack-limit interruption. Fuel and
+/// epochs are charged and checked once before the operation and never
+/// inside it.
+pub const BULK_MEMORY_CHUNK_SIZE: u32 = 128 << 20;
+
 /// Helper macro to iterate over all builtin functions and their signatures.
 #[macro_export]
 macro_rules! foreach_builtin_function {
@@ -5,10 +20,13 @@ macro_rules! foreach_builtin_function {
         $mac! {
             // Returns an index for wasm's `memory.grow` builtin function.
             memory_grow(vmctx: vmctx, delta: u64, index: u32) -> pointer;
-            // Returns an index for wasm's `memory.copy`
-            memory_copy(vmctx: vmctx, dst: pointer, src: pointer, len: size);
-            // Returns an index for wasm's `memory.fill` instruction.
-            memory_fill(vmctx: vmctx, dst: pointer, val: u32, len: size);
+            // Returns an index for wasm's `memory.copy`. Under stack-limit
+            // interruption the copy delivers a pending interruption between
+            // chunks, which may end execution, hence the trapping result.
+            memory_copy(vmctx: vmctx, dst: pointer, src: pointer, len: size) -> bool;
+            // Returns an index for wasm's `memory.fill` instruction. Traps
+            // like `memory_copy`.
+            memory_fill(vmctx: vmctx, dst: pointer, val: u32, len: size) -> bool;
             // Returns the current size of the passive `elem` segment.
             passive_elem_segment_len(vmctx: vmctx, elem: u32) -> size;
             // Returns the base address of the passive `elem` segment.

@@ -788,7 +788,7 @@ impl FiberResumeState {
             tls,
             mpk,
             executor,
-            stack_limit: store.replace_stack_limit(self.stack_limit),
+            stack_limit: store.enter_stack_limit(self.stack_limit),
             async_guard_range: store.replace_async_guard_range(async_guard_range),
 
             // The current suspend/future_cx are always null upon resumption, so
@@ -805,14 +805,19 @@ impl FiberResumeState {
 }
 
 impl StoreOpaque {
-    /// Helper function to swap the `stack_limit` field in the `VMStoreContext`
-    /// within this store.
+    /// Helper function to swap in the stack limit of a fiber being resumed.
     ///
-    /// This goes through `VMStoreContext::replace_stack_limit`, so a pending
+    /// This goes through `VMStoreContext::enter_stack_limit`, so a pending
     /// stack-limit interruption survives the switch and is delivered on
-    /// whichever stack next runs this store's wasm.
-    fn replace_stack_limit(&mut self, stack_limit: usize) -> usize {
-        self.vm_store_context().replace_stack_limit(stack_limit)
+    /// whichever stack, and processor, next runs this store's wasm.
+    fn enter_stack_limit(&mut self, stack_limit: usize) -> usize {
+        self.vm_store_context().enter_stack_limit(stack_limit)
+    }
+
+    /// Helper function to restore the stack limit a suspending fiber's
+    /// resumer had, through `VMStoreContext::leave_stack_limit`.
+    fn leave_stack_limit(&mut self, stack_limit: usize) -> usize {
+        self.vm_store_context().leave_stack_limit(stack_limit)
     }
 
     /// Helper function to swap the `async_guard_range` field in the `VMStoreContext`
@@ -872,7 +877,7 @@ impl PriorFiberResumeState {
             tls,
             mpk,
             executor,
-            stack_limit: store.replace_stack_limit(self.stack_limit),
+            stack_limit: store.leave_stack_limit(self.stack_limit),
         }
     }
 }

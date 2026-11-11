@@ -21,6 +21,7 @@ pub(crate) struct Formats {
     pub(crate) jump: Rc<InstructionFormat>,
     pub(crate) load: Rc<InstructionFormat>,
     pub(crate) load_no_offset: Rc<InstructionFormat>,
+    pub(crate) load_processor_local: Rc<InstructionFormat>,
     pub(crate) multiary: Rc<InstructionFormat>,
     pub(crate) nullary: Rc<InstructionFormat>,
     pub(crate) shuffle: Rc<InstructionFormat>,
@@ -164,6 +165,10 @@ impl Formats {
             load_no_offset: Builder::new("LoadNoOffset")
                 .imm(&imm.memflags)
                 .value()
+                .build(),
+
+            load_processor_local: Builder::new("LoadProcessorLocal")
+                .imm(&imm.offset32)
                 .build(),
 
             store: Builder::new("Store")

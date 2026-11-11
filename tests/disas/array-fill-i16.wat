@@ -87,7 +87,7 @@
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly can_move region0 gv0+8
 ;;     gv2 = load.i64 notrap aligned region1 gv1+24
-;;     sig0 = (i64 vmctx, i64, i32, i64) tail
+;;     sig0 = (i64 vmctx, i64, i32, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;     stack_limit = gv2
 ;;
@@ -110,15 +110,15 @@
 ;; @003f                               v24 = iconst.i64 20
 ;; @003f                               v25 = iadd v9, v24  ; v24 = 20
 ;; @003f                               v16 = iconst.i64 1
-;;                                     v44 = ishl v14, v16  ; v16 = 1
-;; @003f                               v29 = iadd v25, v44
-;;                                     v48 = ishl v15, v16  ; v16 = 1
-;; @003f                               v38 = uadd_overflow_trap v29, v48, user2
+;;                                     v45 = ishl v14, v16  ; v16 = 1
+;; @003f                               v29 = iadd v25, v45
+;;                                     v49 = ishl v15, v16  ; v16 = 1
+;; @003f                               v38 = uadd_overflow_trap v29, v49, user2
 ;; @003f                               v37 = iadd v8, v36
 ;; @003f                               v39 = icmp ugt v38, v37
 ;; @003f                               trapnz v39, user2
 ;; @003b                               v5 = iconst.i32 0
-;; @003f                               call fn0(v0, v29, v5, v48)  ; v5 = 0
+;; @003f                               v41 = call fn0(v0, v29, v5, v49)  ; v5 = 0
 ;; @0042                               jump block1
 ;;
 ;;                                 block1:
@@ -134,7 +134,7 @@
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly can_move region0 gv0+8
 ;;     gv2 = load.i64 notrap aligned region1 gv1+24
-;;     sig0 = (i64 vmctx, i64, i32, i64) tail
+;;     sig0 = (i64 vmctx, i64, i32, i64) -> i8 tail
 ;;     fn0 = colocated u805306368:2 sig0
 ;;     stack_limit = gv2
 ;;
@@ -157,15 +157,15 @@
 ;; @004d                               v24 = iconst.i64 20
 ;; @004d                               v25 = iadd v9, v24  ; v24 = 20
 ;; @004d                               v16 = iconst.i64 1
-;;                                     v44 = ishl v14, v16  ; v16 = 1
-;; @004d                               v29 = iadd v25, v44
-;;                                     v48 = ishl v15, v16  ; v16 = 1
-;; @004d                               v38 = uadd_overflow_trap v29, v48, user2
+;;                                     v45 = ishl v14, v16  ; v16 = 1
+;; @004d                               v29 = iadd v25, v45
+;;                                     v49 = ishl v15, v16  ; v16 = 1
+;; @004d                               v38 = uadd_overflow_trap v29, v49, user2
 ;; @004d                               v37 = iadd v8, v36
 ;; @004d                               v39 = icmp ugt v38, v37
 ;; @004d                               trapnz v39, user2
 ;; @004d                               v40 = iconst.i32 255
-;; @004d                               call fn0(v0, v29, v40, v48)  ; v40 = 255
+;; @004d                               v41 = call fn0(v0, v29, v40, v49)  ; v40 = 255
 ;; @0050                               jump block1
 ;;
 ;;                                 block1:
