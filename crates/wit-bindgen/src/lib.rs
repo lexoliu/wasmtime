@@ -196,6 +196,15 @@ pub struct Opts {
     pub imports: FunctionConfig,
     /// TODO
     pub exports: FunctionConfig,
+
+    /// Whether to emit a `COMPONENT_TYPE` constant containing a
+    /// binary-encoded description of the world that bindings were
+    /// generated for.
+    ///
+    /// This can be decoded with `wit_parser::decoding::decode_world` to recover
+    /// the `Resolve` and `WorldId` used to generate the bindings, without
+    /// requiring separate bookkeeping of the original WIT files.
+    pub include_component_type: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -493,7 +502,7 @@ impl Wasmtime {
         let key_name = resolve.name_world_key(&key);
         generator.generate_add_to_linker(id, &key_name);
         let body = String::from(mem::take(&mut generator.src));
-        let interface_name = resolve.interfaces[id].name.as_ref().unwrap();
+        let interface_name = to_rust_ident(resolve.interfaces[id].name.as_ref().unwrap());
         let body = format!("pub mod {interface_name} {{\n{body}\n}}");
         let path = self.generate_interface_name(resolve, id, &key, InterfaceKind::Named);
         self.named_import_modules
@@ -1153,6 +1162,26 @@ impl<_T: Send + 'static> {camel}Pre<_T> {{
         let named_imports = mem::take(&mut self.named_import_modules);
         self.emit_modules(named_imports);
 
+        if self.opts.include_component_type {
+            let encoded = wit_component::metadata::encode(
+                resolve,
+                world,
+                wit_component::StringEncoding::UTF8,
+                None,
+            )?;
+            uwriteln!(
+                self.src,
+                "/// A binary-encoded description of the WIT world that these \
+                 bindings were generated from.\n\
+                 ///\n\
+                 /// This can be decoded with the `wit_parser::decoding::decode_world` \
+                 function to recover the WIT `Resolve` and `WorldId` that were used \
+                 to generate these bindings.\n\
+                 pub const COMPONENT_TYPE: &[u8] = b\"{}\";",
+                encoded.escape_ascii(),
+            );
+        }
+
         let mut src = mem::take(&mut self.src);
         if self.opts.rustfmt {
             let mut child = Command::new("rustfmt")
@@ -1691,7 +1720,7 @@ impl Wasmtime {
                         {id_outer}move |caller: &{wt}::component::Accessor::<T>, rep| {{
                             {id_inner}
                             {wt}::component::__internal::Box::pin(async move {{
-                                let accessor = &caller.with_getter(host_getter);
+                                let accessor = &caller.with_getter::<D>(host_getter);
                                 {wt}::ToWasmtimeResult::to_wasmtime_result(
                                     Host{camel}WithStore::<T>::drop(accessor, {id_arg}{wt}::component::Resource::new_own(rep)).await
                                 )
@@ -1719,7 +1748,7 @@ impl Wasmtime {
         } else {
             let (first_arg, trait_suffix) = if flags.contains(FunctionFlags::STORE) {
                 (
-                    format!("{wt}::component::Access::new(store, host_getter)"),
+                    format!("{wt}::component::Access::<T, D>::new(store, host_getter)"),
                     "WithStore::<T>",
                 )
             } else {
@@ -2827,7 +2856,10 @@ pub fn add_to_linker<T, D>(
         }
 
         if func.kind.is_async() {
-            uwriteln!(self.src, "let host = &caller.with_getter(host_getter);");
+            uwriteln!(
+                self.src,
+                "let host = &caller.with_getter::<D>(host_getter);"
+            );
         } else if flags.contains(FunctionFlags::STORE) {
             uwriteln!(
                 self.src,
@@ -2835,7 +2867,7 @@ pub fn add_to_linker<T, D>(
             );
             uwriteln!(
                 self.src,
-                "let host = {wt}::component::Access::new(access_cx, host_getter);"
+                "let host = {wt}::component::Access::<T, D>::new(access_cx, host_getter);"
             );
         } else {
             self.src

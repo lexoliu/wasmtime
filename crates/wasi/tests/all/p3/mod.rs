@@ -4,7 +4,7 @@ use test_programs_artifacts::*;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Result, error::Context as _, format_err};
 use wasmtime_wasi::p3::bindings::Command;
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
+use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 
 async fn run(path: &str) -> Result<()> {
     run_allow_blocking_current_thread(path, false).await
@@ -156,6 +156,44 @@ async fn p3_sockets_udp_send() -> wasmtime::Result<()> {
 }
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p3_sockets_udp_send_race() -> wasmtime::Result<()> {
+    use std::io::ErrorKind;
+    use std::net::{Ipv4Addr, UdpSocket};
+    use tokio::task::yield_now;
+    use wasmtime_wasi::sockets::SocketAddrUse;
+
+    let allowed = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let forbidden = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let allowed_addr = allowed.local_addr()?;
+    let forbidden_addr = forbidden.local_addr()?;
+
+    run_with_builder(P3_SOCKETS_UDP_SEND_RACE_COMPONENT, false, |builder| {
+        builder.socket_addr_check(move |addr, use_| {
+            Box::pin(async move {
+                yield_now().await;
+                !matches!(use_, SocketAddrUse::UdpSend) || addr != forbidden_addr
+            })
+        });
+        builder.env("ALLOWED_PORT", allowed_addr.port().to_string());
+        builder.env("FORBIDDEN_PORT", forbidden_addr.port().to_string());
+    })
+    .await?;
+
+    let mut buf = [0; 16];
+    allowed.set_nonblocking(true)?;
+    let n = allowed.recv(&mut buf)?;
+    assert_eq!(&buf[..n], b"x");
+
+    forbidden.set_nonblocking(true)?;
+    assert!(
+        matches!(forbidden.recv(&mut buf), Err(e) if e.kind() == ErrorKind::WouldBlock),
+        "unexpected datagram delivered to the forbidden address"
+    );
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn p3_sockets_udp_sockopts() -> wasmtime::Result<()> {
     run(P3_SOCKETS_UDP_SOCKOPTS_COMPONENT).await
 }
@@ -176,6 +214,17 @@ async fn p3_readdir_blocking() -> wasmtime::Result<()> {
 }
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p3_path_rename_trailing_slashes() -> wasmtime::Result<()> {
+    let fixture = crate::store::SandboxFixture::new()?;
+    run_with_builder(P3_PATH_RENAME_TRAILING_SLASHES_COMPONENT, false, |b| {
+        fixture.configure_wasi(b)
+    })
+    .await?;
+    fixture.assert_secure();
+    Ok(())
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn p3_file_write() -> wasmtime::Result<()> {
     run(P3_FILE_WRITE_COMPONENT).await
 }
@@ -183,6 +232,15 @@ async fn p3_file_write() -> wasmtime::Result<()> {
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn p3_file_write_blocking() -> wasmtime::Result<()> {
     run_allow_blocking_current_thread(P3_FILE_WRITE_COMPONENT, true).await
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p3_file_write_chunked() -> wasmtime::Result<()> {
+    run(P3_FILE_WRITE_CHUNKED_COMPONENT).await
+}
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p3_file_settime_overflow() -> wasmtime::Result<()> {
+    run(P3_FILE_SETTIME_OVERFLOW_COMPONENT).await
 }
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
@@ -203,12 +261,7 @@ async fn run_with_readonly_testfile(component_path: &str) -> wasmtime::Result<()
 
     run_with_builder(component_path, false, |builder| {
         builder
-            .preopened_dir(
-                tempdir.path(),
-                "readonly",
-                DirPerms::READ | DirPerms::MUTATE,
-                FilePerms::READ,
-            )
+            .preopened_dir(tempdir.path(), "readonly", FsPerms::ReadOnly)
             .unwrap();
     })
     .await?;

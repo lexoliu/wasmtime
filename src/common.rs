@@ -323,7 +323,13 @@ impl RunCommon {
         builder.allow_blocking_current_thread(self.common.wasm.timeout.is_none());
 
         if self.common.wasi.inherit_env == Some(true) {
-            for (k, v) in std::env::vars() {
+            for (k, v) in std::env::vars_os() {
+                let k = k.to_str().ok_or_else(|| {
+                    format_err!("environment variable name {k:?} not valid utf-8")
+                })?;
+                let v = v.to_str().ok_or_else(|| {
+                    format_err!("environment variable {k:?} value {v:?} not valid utf-8")
+                })?;
                 builder.env(&k, &v);
             }
         }
@@ -344,12 +350,7 @@ impl RunCommon {
         }
 
         for (host, guest) in self.dirs.iter() {
-            builder.preopened_dir(
-                host,
-                guest,
-                wasmtime_wasi::DirPerms::all(),
-                wasmtime_wasi::FilePerms::all(),
-            )?;
+            builder.preopened_dir(host, guest, wasmtime_wasi::FsPerms::ReadWrite)?;
         }
         if let Some(cwd) = &self.common.wasi.cwd {
             builder.initial_cwd(cwd);
@@ -364,6 +365,9 @@ impl RunCommon {
 
         if self.common.wasi.inherit_network == Some(true) {
             builder.inherit_network();
+            // Implicitly enable TCP/UDP if the entire network is being
+            // inherited to avoid the need to also pass `-Stcp,udp`.
+            builder.allow_tcp(true).allow_udp(true);
         }
         if let Some(enable) = self.common.wasi.allow_ip_name_lookup {
             builder.allow_ip_name_lookup(enable);

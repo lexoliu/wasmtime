@@ -39,7 +39,6 @@ wasm-compose = { workspace = true, optional = true }
 wit-parser = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 libc = { workspace = true }
-cfg-if = { workspace = true }
 log = { workspace = true }
 wat = { workspace = true, optional = true }
 serde = { workspace = true }
@@ -340,7 +339,12 @@ call-hook = []
 
 # Enables support for "memory protection keys" which can be used in conjunction
 # with the pooling allocator on x64 to compact linear memory allocations.
-memory-protection-keys = ["pooling-allocator"]
+memory-protection-keys = [
+  "pooling-allocator",
+  # MPK currently relies on call-hooks to manage the PKRU register for the host,
+  # so this is implicitly enabled when MPK is enabled.
+  "call-hook",
+]
 
 # Enables a re-export of wasmparser, so that an embedder of Wasmtime can use
 # exactly the version of the parser library that Wasmtime does. Sometimes this

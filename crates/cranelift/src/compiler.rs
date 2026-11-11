@@ -481,6 +481,7 @@ fn calls_wasm(body: &FunctionBody<'_>) -> Result<bool, WasmError> {
             | Operator::ReturnCallRef { .. }
             | Operator::Resume { .. }
             | Operator::ResumeThrow { .. }
+            | Operator::ResumeThrowRef { .. }
             | Operator::Switch { .. } => return Ok(true),
             _ => {}
         }

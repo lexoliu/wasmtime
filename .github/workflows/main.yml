@@ -124,12 +124,22 @@ jobs:
         crate: cargo-vet
         version: 0.10.2
     - id: vet
-      run: cargo vet --locked
+      run: |
+        for attempt in 1 2 3 4 5; do
+          [ "$attempt" = "5" ] && exit 1
+          cargo vet --locked && break
+          sleep 5
+        done
       continue-on-error: ${{ github.event_name == 'pull_request' }}
 
     # Double-check that if versions are bumped that `cargo vet` still works.
     # This is intended to weed out mistakes such as #9115 from happening again.
-    - run: rustc scripts/publish.rs && ./publish bump-patch && cargo vet
+    - run: |
+        for attempt in 1 2 3 4 5; do
+          [ "$attempt" = "5" ] && exit 1
+          rustc scripts/publish.rs && ./publish bump-patch && cargo vet && break
+          sleep 5
+        done
       name: Ensure `cargo vet` works if versions are bumped
 
   cargo_vet_failure_for_prs:
@@ -707,6 +717,12 @@ jobs:
       env:
         RUSTFLAGS: "--cfg arc_try_new"
 
+    # Check the x64 assembler against the Intel XED disassembler, which knows
+    # about newer encodings that the bundled Capstone cannot decode. This is
+    # opt-in via `fuzz-xed` because XED is built from source; the C compiler and
+    # Python that requires are already present on this runner.
+    - run: cargo test -p cranelift-assembler-x64 --features fuzz-xed
+
     # Smoke test the coverage script.
     - run: rustup target add wasm32-unknown-unknown
     - run: rustup component add llvm-tools
@@ -721,11 +737,11 @@ jobs:
     - uses: ./.github/actions/cargo-install
       with:
         crate: cargo-fuzz
-        version: 0.13.1
+        version: 0.13.2
     - uses: ./.github/actions/apt-get-install
       with:
         packages: ocaml-nox ocamlbuild ocaml-findlib libzarith-ocaml-dev
-    - run: cargo fuzz check --dev
+    - run: cargo fuzz check --dev --features fuzz-xed
     - run: cargo fuzz check --dev --fuzz-dir ./cranelift/isle/fuzz
     - run: cargo fuzz check --dev --fuzz-dir ./crates/environ/fuzz --features component-model
     - run: cargo fuzz check --dev --fuzz-dir ./cranelift/assembler-x64/fuzz
@@ -850,7 +866,12 @@ jobs:
       if: matrix.target == 'x86_64-pc-windows-gnu'
 
     # Update binutils if MinGW due to https://github.com/rust-lang/rust/issues/112368
-    - run: C:/msys64/usr/bin/pacman.exe -S --needed mingw-w64-x86_64-gcc --noconfirm
+    - run: |
+        for attempt in 1 2 3 4 5; do
+          [ "$attempt" = "5" ] && exit 1
+          C:/msys64/usr/bin/pacman.exe -S --needed mingw-w64-x86_64-gcc --noconfirm && break
+          sleep 5
+        done
       if: matrix.target == 'x86_64-pc-windows-gnu'
     - shell: pwsh
       run: echo "C:\msys64\mingw64\bin" >> $Env:GITHUB_PATH
@@ -1003,45 +1024,6 @@ jobs:
       shell: pwsh
     - run: python3 ./ci/run-tests.py --locked ${{ matrix.bucket }}
       if: runner.os != 'Windows'
-
-  # Test `wasmtime-wasi-nn` in its own job, as not all of its backends are
-  # compatible with all targets, and each must be tested separately anyways.
-  test_wasi_nn:
-    strategy:
-      matrix:
-        feature: ["openvino", "onnx-download"]
-        os: ["ubuntu-24.04", "windows-2025"]
-        include:
-          - os: windows-2025
-            feature: winml
-    name: Test wasi-nn (${{ matrix.feature }}, ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    needs: determine
-    if: needs.determine.outputs.run-full
-    steps:
-    - uses: actions/checkout@v6
-      with:
-        submodules: true
-    - uses: ./.github/actions/install-rust
-
-    # Install OpenVINO
-    - uses: abrown/install-openvino-action@v10
-      if: runner.arch == 'X64'
-
-    # Install WinML for testing wasi-nn WinML backend. WinML is only available
-    # on Windows clients and Windows Server with desktop experience enabled.
-    # GitHub Actions Window Server image doesn't have desktop experience
-    # enabled, so we download the standalone library from ONNX Runtime project.
-    - uses: nuget/setup-nuget@v2
-      if: (runner.os == 'Windows') && (matrix.feature == 'winml')
-    - run: nuget install Microsoft.AI.MachineLearning
-      if: (runner.os == 'Windows') && (matrix.feature == 'winml')
-
-    # Install Rust targets.
-    - run: rustup target add wasm32-wasip1 wasm32-wasip2
-
-    # Run the tests!
-    - run: cargo test -p wasmtime-wasi-nn --features ${{ matrix.feature }}
 
   # Test `wasmtime-wasi-tls` in its own job, as not all of its providers are
   # compatible with all targets. The primary culprit is the OpenSSL dependency,
@@ -1348,6 +1330,7 @@ jobs:
     - uses: ./.github/actions/install-rust
     - run: cargo run -p cranelift-isle-veri --bin veri -- --config cranelift/isle/veri/configs/aarch64-fast.args --skip-solver
     - run: cargo run -p cranelift-isle-veri --bin veri -- --name x64 --rule iadd_base_case_32_or_64_lea --skip-solver
+    - run: cargo run -p cranelift-isle-veri --bin veri -- --name opt --only-root simplify --default-excludes --skip-solver
 
   # Perform release builds of `wasmtime` and `libwasmtime.so`. Builds a variety
   # of platforms and architectures and then uploads the release artifacts to
@@ -1438,7 +1421,6 @@ jobs:
       - test_capi
       - test_debug_dwarf
       - test_fuzzing
-      - test_wasi_nn
       - test_nightly
       - build
       - rustfmt

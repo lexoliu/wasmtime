@@ -1606,29 +1606,31 @@ impl Masm for MacroAssembler {
     fn atomic_rmw(
         &mut self,
         context: &mut CodeGenContext<Emission>,
-        addr: Self::Address,
         size: OperandSize,
         op: RmwOp,
         flags: MemFlagsData,
         extend: Option<Extend<Zero>>,
     ) -> Result<()> {
         let res = match op {
-            RmwOp::Add => {
+            RmwOp::Add | RmwOp::Sub | RmwOp::Xchg => {
                 let operand = context.pop_to_reg(self, None)?;
-                self.asm
-                    .lock_xadd(addr, writable!(operand.reg), size, flags);
-                operand.reg
-            }
-            RmwOp::Sub => {
-                let operand = context.pop_to_reg(self, None)?;
-                self.asm.neg(operand.reg, writable!(operand.reg), size);
-                self.asm
-                    .lock_xadd(addr, writable!(operand.reg), size, flags);
-                operand.reg
-            }
-            RmwOp::Xchg => {
-                let operand = context.pop_to_reg(self, None)?;
-                self.asm.xchg(addr, writable!(operand.reg), size, flags);
+                let base = context.pop_to_reg(self, None)?;
+                let addr = self.address_at_reg(base.reg, 0)?;
+
+                match op {
+                    RmwOp::Add => self
+                        .asm
+                        .lock_xadd(addr, writable!(operand.reg), size, flags),
+                    RmwOp::Sub => {
+                        self.asm.neg(operand.reg, writable!(operand.reg), size);
+                        self.asm
+                            .lock_xadd(addr, writable!(operand.reg), size, flags);
+                    }
+                    RmwOp::Xchg => self.asm.xchg(addr, writable!(operand.reg), size, flags),
+                    _ => unreachable!(),
+                }
+
+                context.free_reg(base.reg);
                 operand.reg
             }
             RmwOp::And | RmwOp::Or | RmwOp::Xor => {
@@ -1640,8 +1642,11 @@ impl Masm for MacroAssembler {
                         "invalid op for atomic_rmw_seq, should be one of `or`, `and` or `xor`"
                     ),
                 };
+
                 let dst = context.reg(regs::rax(), self)?;
                 let operand = context.pop_to_reg(self, None)?;
+                let base = context.pop_to_reg(self, None)?;
+                let addr = self.address_at_reg(base.reg, 0)?;
 
                 self.with_scratch::<IntScratch, _>(|masm, scratch| {
                     masm.asm.atomic_rmw_seq(
@@ -1656,6 +1661,7 @@ impl Masm for MacroAssembler {
                 });
 
                 context.free_reg(operand.reg);
+                context.free_reg(base.reg);
                 dst
             }
         };
@@ -1793,20 +1799,18 @@ impl Masm for MacroAssembler {
     fn atomic_cas(
         &mut self,
         context: &mut CodeGenContext<Emission>,
-        addr: Self::Address,
         size: OperandSize,
         flags: MemFlagsData,
         extend: Option<Extend<Zero>>,
     ) -> Result<()> {
-        // `cmpxchg` expects `expected` to be in the `*a*` register.
-        // reserve rax for the expected argument.
-
         let replacement =
             context.without::<Result<TypedReg>, _, _>(&[regs::rax()], self, |cx, masm| {
                 cx.pop_to_reg(masm, None)
             })??;
 
         let expected = context.pop_to_reg(self, Some(regs::rax()))?;
+        let base = context.pop_to_reg(self, None)?;
+        let addr = self.address_at_reg(base.reg, 0)?;
 
         self.asm
             .cmpxchg(addr, replacement.reg, writable!(expected.reg), size, flags);
@@ -1818,6 +1822,7 @@ impl Masm for MacroAssembler {
 
         context.stack.push(expected.into());
         context.free_reg(replacement);
+        context.free_reg(base.reg);
 
         Ok(())
     }

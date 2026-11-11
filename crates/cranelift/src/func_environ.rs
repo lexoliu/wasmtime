@@ -535,6 +535,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             | Operator::Return
             | Operator::CallIndirect { .. }
             | Operator::Call { .. }
+            | Operator::CallRef { .. }
             | Operator::ReturnCall { .. }
             | Operator::ReturnCallRef { .. }
             | Operator::ReturnCallIndirect { .. }
@@ -600,7 +601,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         // After a function call we need to reload our fuel value since the
         // function may have changed it.
         match op {
-            Operator::Call { .. } | Operator::CallIndirect { .. } => {
+            Operator::Call { .. } | Operator::CallIndirect { .. } | Operator::CallRef { .. } => {
                 self.fuel_load_into_var(builder);
             }
             _ => {}
@@ -683,21 +684,6 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         builder.switch_to_block(continuation_block);
     }
 
-    /// Manually insert a fuel check, as opposed to what already happens around
-    /// normal loops headers and function entries.
-    ///
-    /// This can be used for expensive opcodes, such as `array.copy`, where the
-    /// operation's runtime is a function of the runtime state.
-    fn manual_fuel_check(&mut self, builder: &mut FunctionBuilder<'_>, fuel_to_consume: ir::Value) {
-        self.fuel_increment_var(builder);
-
-        let fuel = builder.use_var(self.fuel_var);
-        let fuel = builder.ins().iadd(fuel, fuel_to_consume);
-        builder.def_var(self.fuel_var, fuel);
-
-        self.fuel_check(builder);
-    }
-
     fn epoch_function_entry(&mut self, builder: &mut FunctionBuilder<'_>) {
         debug_assert!(self.epoch_deadline_var.is_reserved_value());
         self.epoch_deadline_var = builder.declare_var(ir::types::I64);
@@ -770,7 +756,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
     }
 
     /// Emits the resumable stack-limit check used by stack-limit
-    /// interruption at loop headers and between bulk-memory chunks.
+    /// interruption at loop headers and before each bulk-memory operation.
     ///
     /// Nothing is cached across the body: the store-context pointer load is
     /// read-only and may be hoisted, but the limit itself is reloaded at
@@ -1634,10 +1620,7 @@ impl FuncEnvironment<'_> {
         // The base pointer load is `can_move`, and additionally `readonly` when
         // this memory's base can never move.
         let memory_tunables = MemoryTunables::new(self.tunables, MemoryKind::LinearMemory);
-        let mut base_flags = ir::MemFlagsData::trusted().with_can_move();
-        if !memory.memory_may_move(&memory_tunables) {
-            base_flags.set_readonly();
-        }
+        let base_readonly = !memory.memory_may_move(&memory_tunables);
 
         if let Some(def_index) = self.module.defined_memory_index(index) {
             if is_shared {
@@ -1648,49 +1631,63 @@ impl FuncEnvironment<'_> {
                 let mem = self
                     .alias_regions
                     .vmctx_vmmemory_pointer_load(func, def_index);
+                let mut base = self.alias_regions.vm_memory_definition().base();
+                base.can_move();
+                if base_readonly {
+                    base.readonly();
+                }
+                let base = base.to_deferred_load(func);
+                let len = self
+                    .alias_regions
+                    .vm_memory_definition()
+                    .current_length()
+                    .to_deferred_load(func);
                 (
-                    VmctxLoadChain::new(smallvec![
-                        mem,
-                        self.alias_regions
-                            .vmmemory_definition_base_load(func, base_flags),
-                    ]),
-                    VmctxLoadChain::new(smallvec![
-                        mem,
-                        self.alias_regions
-                            .vmmemory_definition_current_length_load(func),
-                    ]),
+                    VmctxLoadChain::new(smallvec![mem, base]),
+                    VmctxLoadChain::new(smallvec![mem, len]),
                 )
             } else {
+                // A defined, owned memory's `VMMemoryDefinition` is inlined into
+                // the `vmctx` at an absolute offset, so its fields are loaded
+                // relative to the `vmctx` itself: fold that offset into each
+                // field's offset.
                 let owned_index = self.module.owned_memory_index(def_index);
+                let vmctx_off = self.offsets.vmctx_vmmemory_definition(owned_index);
+                let mut base = self.alias_regions.vm_memory_definition().base();
+                base.can_move();
+                if base_readonly {
+                    base.readonly();
+                }
+                let base = base.relative_to(vmctx_off).to_deferred_load(func);
+                let len = self
+                    .alias_regions
+                    .vm_memory_definition()
+                    .current_length()
+                    .relative_to(vmctx_off)
+                    .to_deferred_load(func);
                 (
-                    VmctxLoadChain::new(smallvec![
-                        self.alias_regions.vmctx_vmmemory_definition_base_load(
-                            func,
-                            owned_index,
-                            base_flags
-                        )
-                    ]),
-                    VmctxLoadChain::new(smallvec![
-                        self.alias_regions
-                            .vmctx_vmmemory_definition_current_length_load(func, owned_index)
-                    ]),
+                    VmctxLoadChain::new(smallvec![base]),
+                    VmctxLoadChain::new(smallvec![len]),
                 )
             }
         } else {
             let mem = self
                 .alias_regions
                 .vmctx_vmmemory_import_from_load(func, index);
+            let mut base = self.alias_regions.vm_memory_definition().base();
+            base.can_move();
+            if base_readonly {
+                base.readonly();
+            }
+            let base = base.to_deferred_load(func);
+            let len = self
+                .alias_regions
+                .vm_memory_definition()
+                .current_length()
+                .to_deferred_load(func);
             (
-                VmctxLoadChain::new(smallvec![
-                    mem,
-                    self.alias_regions
-                        .vmmemory_definition_base_load(func, base_flags),
-                ]),
-                VmctxLoadChain::new(smallvec![
-                    mem,
-                    self.alias_regions
-                        .vmmemory_definition_current_length_load(func),
-                ]),
+                VmctxLoadChain::new(smallvec![mem, base]),
+                VmctxLoadChain::new(smallvec![mem, len]),
             )
         }
     }
@@ -1725,29 +1722,31 @@ impl FuncEnvironment<'_> {
         // A fixed-size table can't be resized, so its base address won't change
         // and its base load is `readonly` and `can_move`.
         let is_static = Some(table.limits.min) == table.limits.max;
-        let mut base_flags = ir::MemFlagsData::trusted();
-        if is_static {
-            base_flags = base_flags.with_readonly().with_can_move();
-        }
 
         if let Some(def_index) = self.module.defined_table_index(index) {
             // A defined table's `VMTableDefinition` is inlined into the vmctx,
             // reached at an absolute `vmctx` offset.
+            let vmctx_off = self.offsets.vmctx_vmtable_definition(def_index);
+            let mut base = self.alias_regions.vm_table_definition().base();
+            if is_static {
+                base.readonly().can_move();
+            }
             let base = VmctxLoadChain::new(smallvec![
-                self.alias_regions
-                    .vmctx_vmtable_definition_base_load(func, def_index, base_flags)
+                base.relative_to(vmctx_off).to_deferred_load(func)
             ]);
             let bound = if is_static {
                 TableSize::Static {
                     bound: table.limits.min,
                 }
             } else {
+                let mut current_elements =
+                    self.alias_regions.vm_table_definition().current_elements();
+                current_elements.cast(bound_ty);
                 TableSize::Dynamic {
                     bound: VmctxLoadChain::new(smallvec![
-                        self.alias_regions
-                            .vmctx_vmtable_definition_current_elements_load(
-                                func, def_index, bound_ty
-                            )
+                        current_elements
+                            .relative_to(vmctx_off)
+                            .to_deferred_load(func)
                     ]),
                 }
             };
@@ -1756,11 +1755,11 @@ impl FuncEnvironment<'_> {
             // An imported table is reached through a `*mut VMTableDefinition`
             // loaded from the `vmctx`.
             let from = self.alias_regions.vmctx_vmtable_from_load(func, index);
-            let base = VmctxLoadChain::new(smallvec![
-                from,
-                self.alias_regions
-                    .vmtable_definition_base_load(func, base_flags),
-            ]);
+            let mut base = self.alias_regions.vm_table_definition().base();
+            if is_static {
+                base.readonly().can_move();
+            }
+            let base = VmctxLoadChain::new(smallvec![from, base.to_deferred_load(func)]);
             let bound = if is_static {
                 TableSize::Static {
                     bound: table.limits.min,
@@ -1770,7 +1769,10 @@ impl FuncEnvironment<'_> {
                     bound: VmctxLoadChain::new(smallvec![
                         from,
                         self.alias_regions
-                            .vmtable_definition_current_elements_load(func, bound_ty),
+                            .vm_table_definition()
+                            .current_elements()
+                            .cast(bound_ty)
+                            .to_deferred_load(func),
                     ]),
                 }
             };
@@ -2040,7 +2042,7 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
         let ptr = self.env.offsets.ptr;
 
         // Allocate the on-stack `VMDeferredThread`.
-        let size = u32::from(ptr.size_of_vmdeferred_thread());
+        let size = u32::from(ptr.vm_deferred_thread().size());
         let align_shift = u8::try_from(ptr.size().trailing_zeros()).unwrap();
         let slot = self
             .builder
@@ -2675,6 +2677,13 @@ impl FuncEnvironment<'_> {
         delta: ir::Value,
         init_value: ir::Value,
     ) -> WasmResult<ir::Value> {
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .table_grow_per_element;
+        self.pre_translate_bulk_op(builder, delta, cost)?;
+
         let mut pos = builder.cursor();
         let table = self.table(table_index);
         let (table_vmctx, defined_table_index) =
@@ -2704,22 +2713,46 @@ impl FuncEnvironment<'_> {
         // Conditionally call that on growth success, and otherwise fall through
         // to continue to yield -1 for this growth operation.
         let current_block = builder.current_block().unwrap();
+        let failed_block = builder.create_block();
         let fill_block = builder.create_block();
         let done_block = builder.create_block();
 
-        builder.insert_block_after(fill_block, current_block);
+        builder.insert_block_after(failed_block, current_block);
+        builder.insert_block_after(fill_block, failed_block);
         builder.insert_block_after(done_block, fill_block);
 
+        // Commit the operator's flat cost before branching so translating the
+        // failed path cannot consume fuel that also belongs to the success path.
+        if self.tunables.consume_fuel {
+            self.fuel_increment_var(builder);
+        }
         let failure = builder.ins().iconst(index_type_to_ir_type(index_type), -1);
         let failed = builder.ins().icmp(IntCC::Equal, result_idx, failure);
-        builder.ins().brif(failed, done_block, &[], fill_block, &[]);
+        builder
+            .ins()
+            .brif(failed, failed_block, &[], fill_block, &[]);
+
+        // A failed attempt performs no initialization loop, but still charge
+        // for the requested growth so repeated failures are not free.
+        builder.switch_to_block(failed_block);
+        builder.ins().jump(done_block, &[]);
 
         builder.switch_to_block(fill_block);
-        self.translate_table_fill(builder, table_index, result_idx, init_value, delta)?;
+        self.translate_entity_fill(
+            builder,
+            CheckedEntity::Table {
+                table: table_index,
+                initialized: false,
+            },
+            result_idx,
+            init_value,
+            delta,
+        )?;
         builder.ins().jump(done_block, &[]);
 
         builder.switch_to_block(done_block);
 
+        builder.seal_block(failed_block);
         builder.seal_block(fill_block);
         builder.seal_block(done_block);
 
@@ -2862,6 +2895,12 @@ impl FuncEnvironment<'_> {
         val: ir::Value,
         len: ir::Value,
     ) -> WasmResult<()> {
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .table_fill_per_element;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_fill(
             builder,
             CheckedEntity::Table {
@@ -3038,6 +3077,11 @@ impl FuncEnvironment<'_> {
     ) -> WasmResult<ir::Value> {
         let interned_type_index = self.module.types[array_type_index].unwrap_module_type_index();
         let array_layout = self.array_layout(interned_type_index)?.clone();
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .array_new_data_per_element;
         gc::translate_array_new_entity(
             self,
             builder,
@@ -3048,6 +3092,7 @@ impl FuncEnvironment<'_> {
             },
             data_offset,
             len,
+            cost,
         )
     }
 
@@ -3059,6 +3104,11 @@ impl FuncEnvironment<'_> {
         elem_offset: ir::Value,
         len: ir::Value,
     ) -> WasmResult<ir::Value> {
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .array_new_elem_per_element;
         gc::translate_array_new_entity(
             self,
             builder,
@@ -3066,6 +3116,7 @@ impl FuncEnvironment<'_> {
             CheckedEntity::Elem(elem_index),
             elem_offset,
             len,
+            cost,
         )
     }
 
@@ -3082,6 +3133,12 @@ impl FuncEnvironment<'_> {
     ) -> WasmResult<()> {
         let dst_ty = self.module.types[dst_array_type_index].unwrap_module_type_index();
         let src_ty = self.module.types[src_array_type_index].unwrap_module_type_index();
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .array_copy_per_element;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_copy(
             builder,
             CheckedEntity::Array {
@@ -3110,6 +3167,12 @@ impl FuncEnvironment<'_> {
         len: ir::Value,
     ) -> WasmResult<()> {
         let ty = self.module.types[array_type_index].unwrap_module_type_index();
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .array_fill_per_element;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_fill(
             builder,
             CheckedEntity::Array {
@@ -3135,6 +3198,12 @@ impl FuncEnvironment<'_> {
     ) -> WasmResult<()> {
         let ty = self.module.types[array_type_index].unwrap_module_type_index();
         let array_layout = self.array_layout(ty)?.clone();
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .array_init_data_per_element;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_copy(
             builder,
             CheckedEntity::Array {
@@ -3163,6 +3232,12 @@ impl FuncEnvironment<'_> {
         len: ir::Value,
     ) -> WasmResult<()> {
         let ty = self.module.types[array_type_index].unwrap_module_type_index();
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .array_init_elem_per_element;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_copy(
             builder,
             CheckedEntity::Array {
@@ -3545,6 +3620,9 @@ impl FuncEnvironment<'_> {
             self.memory_vmctx_and_defined_index(&mut pos, index);
 
         let index_type = self.memory(index).idx_type;
+        let cost = self.tunables.operator_cost.variable().memory_grow_per_page;
+        self.pre_translate_bulk_op(builder, val, cost)?;
+        let mut pos = builder.cursor();
         let val = self.cast_index_to_i64(&mut pos, val, index_type);
         let call_inst = pos
             .ins()
@@ -3576,11 +3654,19 @@ impl FuncEnvironment<'_> {
                     .alias_regions
                     .vmctx_vmmemory_pointer(pos, vmctx, def_index);
                 self.alias_regions
-                    .vmmemory_definition_current_length_atomic(pos, mem_ptr)
+                    .vm_memory_definition()
+                    .current_length()
+                    .load_atomic(pos, mem_ptr)
             } else {
+                // A defined, owned memory's `VMMemoryDefinition` is inlined into
+                // the `vmctx` at an absolute offset.
                 let owned_index = self.module.owned_memory_index(def_index);
+                let vmctx_off = self.offsets.vmctx_vmmemory_definition(owned_index);
                 self.alias_regions
-                    .vmctx_vmmemory_definition_current_length(pos, owned_index, vmctx)
+                    .vm_memory_definition()
+                    .current_length()
+                    .relative_to(vmctx_off)
+                    .load(pos, vmctx)
             }
         } else {
             let mem_ptr = self
@@ -3588,10 +3674,14 @@ impl FuncEnvironment<'_> {
                 .vmctx_vmmemory_import_from(pos, vmctx, index);
             if is_shared {
                 self.alias_regions
-                    .vmmemory_definition_current_length_atomic(pos, mem_ptr)
+                    .vm_memory_definition()
+                    .current_length()
+                    .load_atomic(pos, mem_ptr)
             } else {
                 self.alias_regions
-                    .vmmemory_definition_current_length(pos, mem_ptr)
+                    .vm_memory_definition()
+                    .current_length()
+                    .load(pos, mem_ptr)
             }
         }
     }
@@ -3629,6 +3719,8 @@ impl FuncEnvironment<'_> {
         src: ir::Value,
         len: ir::Value,
     ) -> WasmResult<()> {
+        let cost = self.tunables.operator_cost.variable().memory_copy_per_byte;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_copy(builder, dst_index, src_index, dst, src, len)
     }
 
@@ -3637,7 +3729,11 @@ impl FuncEnvironment<'_> {
     /// The main purpose of this helper is to handle situations when fuel and
     /// epochs are enabled to break up the copy into a loop of chunks with
     /// preemption checks between them.
-    fn raw_bulk_memory_operation(&mut self, builder: &mut FunctionBuilder<'_>, mut op: BulkOp) {
+    fn raw_bulk_memory_operation(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        op: BulkOp,
+    ) -> WasmResult<()> {
         // Fast path: a copy whose byte length is a small compile-time constant is
         // expanded inline (see `emit_inline_memcpy`), skipping the libcall's fixed
         // per-call cost (a wasm/host transition and an indirect call) that
@@ -3658,259 +3754,29 @@ impl FuncEnvironment<'_> {
         } = op
         {
             if bytes <= INLINE_COPY_MAX_BYTES {
-                if self.tunables.consume_fuel {
-                    self.fuel_consumed += bytes as i64;
-                }
                 let src_region = self.bulk_copy_alias_region(builder.func, src_entity);
                 let dst_region = self.bulk_copy_alias_region(builder.func, dst_entity);
                 self.emit_inline_memcpy(builder, dst, src, bytes, src_region, dst_region);
-                return;
+                return Ok(());
             }
         }
-
-        // Very scientifically chosen. Or, more seriously, this is just an
-        // arbitrary number for now. 100k copies of this size locally takes half
-        // a second, so seems like a reasonably large chunk size to not hit perf
-        // too much by chunking but also enable time slicing.
-        const UNINTERRUPTABLE_CHUNK_SIZE: i64 = 128 << 20;
 
         let mut pos = builder.cursor();
         let vmctx = self.vmctx_val(&mut pos);
-        let pointer_type = self.pointer_type();
 
         // Performs a raw call to the actual libcall, as dictated by the
-        // provided `op`. This unconditionally inserts epoch/fuel checks for all
-        // calls.
-        let raw_call =
-            |env: &mut FuncEnvironment<'_>, builder: &mut FunctionBuilder<'_>, op: &_| {
-                if env.tunables.epoch_interruption {
-                    env.epoch_check(builder);
-                }
-                if env.tunables.stack_limit_interruption {
-                    env.stack_limit_interrupt_check(builder);
-                }
-                match *op {
-                    BulkOp::MemoryCopy { dst, src, len, .. } => {
-                        if env.tunables.consume_fuel {
-                            // Note that fuel is always a 64-bit counter.
-                            let fuel_consumed = match env.pointer_type() {
-                                ir::types::I32 => builder.ins().uextend(ir::types::I64, len),
-                                ir::types::I64 => len,
-                                _ => unreachable!(),
-                            };
-                            env.manual_fuel_check(builder, fuel_consumed);
-                        }
-                        let memory_copy = env.builtin_functions.memory_copy(&mut builder.func);
-                        builder.ins().call(memory_copy, &[vmctx, dst, src, len]);
-                    }
-                    BulkOp::MemoryFill { dst, val, len } => {
-                        if env.tunables.consume_fuel {
-                            let fuel_consumed = match env.pointer_type() {
-                                ir::types::I32 => builder.ins().uextend(ir::types::I64, len),
-                                ir::types::I64 => len,
-                                _ => unreachable!(),
-                            };
-                            env.manual_fuel_check(builder, fuel_consumed);
-                        }
-                        let memory_fill = env.builtin_functions.memory_fill(&mut builder.func);
-                        builder.ins().call(memory_fill, &[vmctx, dst, val, len]);
-                    }
-                }
-            };
-
-        // If epochs and fuel are disabled, then just call the libcall and
-        // return. No need for the loops below.
-        if !self.tunables.epoch_interruption
-            && !self.tunables.stack_limit_interruption
-            && !self.tunables.consume_fuel
-        {
-            raw_call(self, builder, &op);
-            return;
-        }
-
-        // If fuel is enabled, first take all the pending fuel and flush it to
-        // our internal variable. This is necessary to avoid picking up all
-        // pending fuel on each turn of the loop below.
-        if self.tunables.consume_fuel {
-            self.fuel_increment_var(builder);
-        }
-
-        let current_block = builder.current_block().unwrap();
-        let chunk_block = builder.create_block();
-        let last_chunk_block = builder.create_block();
-
-        builder.ensure_inserted_block();
-        builder.insert_block_after(chunk_block, current_block);
-        builder.insert_block_after(last_chunk_block, chunk_block);
-
-        let chunk = builder
-            .ins()
-            .iconst(pointer_type, UNINTERRUPTABLE_CHUNK_SIZE);
-
-        // For `memcpy` when chunking this up we might need to do a backwards
-        // copy or a forwards copy. Determine that here and jump to the
-        // backwards copy if needed.
-        let backwards_block = if let BulkOp::MemoryCopy { dst, src, .. } = op {
-            let forwards = builder.ins().icmp(IntCC::UnsignedGreaterThan, src, dst);
-            let forwards_block = builder.create_block();
-            let backwards_block = builder.create_block();
-            builder
-                .ins()
-                .brif(forwards, forwards_block, &[], backwards_block, &[]);
-            builder.switch_to_block(forwards_block);
-            builder.seal_block(forwards_block);
-            Some((backwards_block, op.clone()))
-        } else {
-            None
-        };
-
-        // Helper closure to test if the length in `op` is larger than `chunk`,
-        // and if so do a single chunk. Else this goes to the final block with
-        // the final operation.
-        let has_chunk_branch =
-            |builder: &mut FunctionBuilder<'_>, op: &_, chunk_block, last_chunk_block| {
-                let len = match *op {
-                    BulkOp::MemoryCopy { len, .. } | BulkOp::MemoryFill { len, .. } => len,
-                };
-                let has_chunk = builder.ins().icmp(IntCC::UnsignedGreaterThan, len, chunk);
-                match *op {
-                    BulkOp::MemoryCopy { dst, src, len, .. } => {
-                        builder.ins().brif(
-                            has_chunk,
-                            chunk_block,
-                            &[dst.into(), src.into(), len.into()],
-                            last_chunk_block,
-                            &[dst.into(), src.into(), len.into()],
-                        );
-                    }
-                    BulkOp::MemoryFill { dst, len, .. } => {
-                        builder.ins().brif(
-                            has_chunk,
-                            chunk_block,
-                            &[dst.into(), len.into()],
-                            last_chunk_block,
-                            &[dst.into(), len.into()],
-                        );
-                    }
-                }
-            };
-
-        let append_block_params = |builder: &mut FunctionBuilder<'_>, block, op: &mut _| match op {
+        // provided `op`.
+        match op {
             BulkOp::MemoryCopy { dst, src, len, .. } => {
-                *dst = builder.append_block_param(block, pointer_type);
-                *src = builder.append_block_param(block, pointer_type);
-                *len = builder.append_block_param(block, pointer_type);
+                let memory_copy = self.builtin_functions.memory_copy(&mut builder.func);
+                builder.ins().call(memory_copy, &[vmctx, dst, src, len]);
             }
-            BulkOp::MemoryFill { dst, len, .. } => {
-                *dst = builder.append_block_param(block, pointer_type);
-                *len = builder.append_block_param(block, pointer_type);
+            BulkOp::MemoryFill { dst, val, len } => {
+                let memory_fill = self.builtin_functions.memory_fill(&mut builder.func);
+                builder.ins().call(memory_fill, &[vmctx, dst, val, len]);
             }
-        };
-
-        // Forwards copy: dispatch to the per-chunk loop or the final iteration
-        // if there's no chunks.
-        has_chunk_branch(builder, &op, chunk_block, last_chunk_block);
-
-        // Forwards copy: In the block with per-chunk copies, each operation
-        // performs `chunk` length of bytes and then decrements the current
-        // length by `chunk`. Afterwards a condition tests if we do another
-        // chunk or break out for the final chunk.
-        builder.switch_to_block(chunk_block);
-        append_block_params(builder, chunk_block, &mut op);
-        let op_len = match &mut op {
-            BulkOp::MemoryCopy { len, .. } | BulkOp::MemoryFill { len, .. } => len,
-        };
-        let remaining_len = *op_len;
-        *op_len = chunk;
-        raw_call(self, builder, &op);
-        match &mut op {
-            BulkOp::MemoryCopy { dst, src, len, .. } => {
-                *dst = builder.ins().iadd(*dst, chunk);
-                *src = builder.ins().iadd(*src, chunk);
-                *len = builder.ins().isub(remaining_len, chunk);
-            }
-            BulkOp::MemoryFill { len, dst, .. } => {
-                *dst = builder.ins().iadd(*dst, chunk);
-                *len = builder.ins().isub(remaining_len, chunk);
-            }
-        };
-        has_chunk_branch(builder, &op, chunk_block, last_chunk_block);
-        builder.seal_block(chunk_block);
-
-        // Backwards copy: similar to the above but with adjustments on where
-        // increments/decrements happen. Notably:
-        //
-        // * Initial src/end are the final byte address
-        // * Each chunk starts out by decrementing src/end as opposed to above
-        //   where the increment happens at the end.
-        // * The final block performs the final decrement before jumping to the
-        //   shared `last_chunk_block` between the forwards/backwards paths.
-        if let Some((backwards_block, mut op)) = backwards_block {
-            // Setup `dst=dst+len` and `src=src+len`, then see if we have a
-            // chunk.
-            builder.switch_to_block(backwards_block);
-            builder.seal_block(backwards_block);
-            let backwards_chunk_block = builder.create_block();
-            let backwards_last_chunk_block = builder.create_block();
-            let BulkOp::MemoryCopy { dst, src, len, .. } = &mut op else {
-                unreachable!()
-            };
-            *dst = builder.ins().iadd(*dst, *len);
-            *src = builder.ins().iadd(*src, *len);
-            has_chunk_branch(
-                builder,
-                &op,
-                backwards_chunk_block,
-                backwards_last_chunk_block,
-            );
-
-            // Execute the per-chunk backwards copy, adjusting pointers before
-            // the copy itself.
-            builder.switch_to_block(backwards_chunk_block);
-            append_block_params(builder, backwards_chunk_block, &mut op);
-            let BulkOp::MemoryCopy { dst, src, len, .. } = &mut op else {
-                unreachable!()
-            };
-            let remaining_len = *len;
-            *len = chunk;
-            *dst = builder.ins().isub(*dst, chunk);
-            *src = builder.ins().isub(*src, chunk);
-            raw_call(self, builder, &op);
-            let BulkOp::MemoryCopy { len, .. } = &mut op else {
-                unreachable!()
-            };
-            *len = builder.ins().isub(remaining_len, chunk);
-            has_chunk_branch(
-                builder,
-                &op,
-                backwards_chunk_block,
-                backwards_last_chunk_block,
-            );
-            builder.seal_block(backwards_chunk_block);
-
-            // Final backwards chunk: adjust the dst/src to be their true base
-            // pointers and then delegate to `last_chunk_block` for the actual
-            // memcpy.
-            builder.switch_to_block(backwards_last_chunk_block);
-            builder.seal_block(backwards_last_chunk_block);
-            append_block_params(builder, backwards_last_chunk_block, &mut op);
-            let BulkOp::MemoryCopy { dst, src, len, .. } = &mut op else {
-                unreachable!()
-            };
-            *dst = builder.ins().isub(*dst, *len);
-            *src = builder.ins().isub(*src, *len);
-            builder.ins().jump(
-                last_chunk_block,
-                &[(*dst).into(), (*src).into(), (*len).into()],
-            );
         }
-
-        // In the final block we know that the length of the operation is less
-        // than `chunk`.
-        builder.switch_to_block(last_chunk_block);
-        builder.seal_block(last_chunk_block);
-        append_block_params(builder, last_chunk_block, &mut op);
-        raw_call(self, builder, &op);
+        Ok(())
     }
 
     /// Emits a generic "fill" of `entity` from `dst` for `len` elements,
@@ -3921,6 +3787,9 @@ impl FuncEnvironment<'_> {
     /// `dst` and `len` values must be typed appropriately for `entity`. This
     /// will perform a bounds-check before actually executing the operation and
     /// then afterwards will perform the operation.
+    ///
+    /// Callers must invoke `pre_translate_bulk_op` before calling this method
+    /// to properly account for fuel/epoch checks for this bulk operation.
     fn translate_entity_fill(
         &mut self,
         builder: &mut FunctionBuilder<'_>,
@@ -3941,26 +3810,22 @@ impl FuncEnvironment<'_> {
             self.unchecked_cast_wasm_addr_to_native_addr(&mut builder.cursor(), len, idx_type);
 
         match entity {
-            CheckedEntity::Memory(_) => {
-                self.raw_bulk_memory_operation(
-                    builder,
-                    BulkOp::MemoryFill {
-                        dst: raw_dst_addr,
-                        val,
-                        len: len_ptr,
-                    },
-                );
-            }
+            CheckedEntity::Memory(_) => self.raw_bulk_memory_operation(
+                builder,
+                BulkOp::MemoryFill {
+                    dst: raw_dst_addr,
+                    val,
+                    len: len_ptr,
+                },
+            ),
             CheckedEntity::Table { .. } | CheckedEntity::Array { .. } => {
-                self.emit_raw_array_or_table_fill(builder, entity, raw_dst_addr, val, len_ptr)?;
+                self.emit_raw_array_or_table_fill(builder, entity, raw_dst_addr, val, len_ptr)
             }
             // Not allowed to be written to in wasm.
             CheckedEntity::Data { .. } | CheckedEntity::Elem(_) | CheckedEntity::RuntimeData(_) => {
                 unreachable!()
             }
         }
-
-        Ok(())
     }
 
     /// Performs a manual element-by-element fill of `entity`, starting at
@@ -4003,7 +3868,7 @@ impl FuncEnvironment<'_> {
         if entity.allows_memset(self)
             && let Some(value) = self.fill_value_as_memset(builder, elem_ty, value)
         {
-            self.raw_bulk_memory_operation(
+            return self.raw_bulk_memory_operation(
                 builder,
                 BulkOp::MemoryFill {
                     dst: dst_elem_addr,
@@ -4011,7 +3876,6 @@ impl FuncEnvironment<'_> {
                     len: copy_byte_len,
                 },
             );
-            return Ok(());
         }
 
         // Funcref values are intern'd when stored on the GC heap, and the
@@ -4052,12 +3916,6 @@ impl FuncEnvironment<'_> {
         builder.insert_block_after(loop_block, current_block);
         builder.insert_block_after(continue_block, loop_block);
 
-        // Before entering the loop below flush our fuel counters to ensure
-        // that previous instructions' fuel isn't counted once-per-iteration.
-        if self.tunables.consume_fuel {
-            self.fuel_increment_var(builder);
-        }
-
         // Current block: test to see if this is actually an empty copy. If it
         // is then skip over the entire loop, otherwise enter the loop and
         // perform the first ieration.
@@ -4075,11 +3933,6 @@ impl FuncEnvironment<'_> {
         // by the element size, then see if we turn again or exit.
         builder.switch_to_block(loop_block);
         let elem_addr = builder.append_block_param(loop_block, pointer_ty);
-        // Consume one unit of fuel per loop iteration.
-        if self.tunables.consume_fuel {
-            self.fuel_consumed += 1;
-        }
-        self.translate_loop_header(builder)?;
         match entity {
             CheckedEntity::Table { table, initialized } => {
                 assert!(!is_pre_interned_funcref);
@@ -4194,6 +4047,8 @@ impl FuncEnvironment<'_> {
         val: ir::Value,
         len: ir::Value,
     ) -> WasmResult<()> {
+        let cost = self.tunables.operator_cost.variable().memory_fill_per_byte;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_fill(builder, memory_index, dst, val, len)
     }
 
@@ -4207,6 +4062,8 @@ impl FuncEnvironment<'_> {
         len: ir::Value,
     ) -> WasmResult<()> {
         let seg_index = DataIndex::from_u32(seg_index);
+        let cost = self.tunables.operator_cost.variable().memory_init_per_byte;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_copy(
             builder,
             memory_index,
@@ -4259,6 +4116,9 @@ impl FuncEnvironment<'_> {
     /// of the copy. Both `dst` and `src` have types appropriate to index their
     /// respective entities, and `len` has a type that's the smaller of the two
     /// index types.
+    ///
+    /// Callers must invoke `pre_translate_bulk_op` before calling this method
+    /// to properly account for fuel/epoch checks for this bulk operation.
     fn translate_entity_copy(
         &mut self,
         builder: &mut FunctionBuilder<'_>,
@@ -4329,8 +4189,7 @@ impl FuncEnvironment<'_> {
                         src_entity,
                         dst_entity,
                     },
-                );
-                Ok(())
+                )
             }
 
             // Tables/arrays are sometimes a memcpy, sometimes a per-element
@@ -4555,6 +4414,12 @@ impl FuncEnvironment<'_> {
         src: ir::Value,
         len: ir::Value,
     ) -> WasmResult<()> {
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .table_copy_per_element;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_copy(
             builder,
             CheckedEntity::Table {
@@ -4675,7 +4540,7 @@ impl FuncEnvironment<'_> {
         // parameters (or expand it inline; see `raw_bulk_memory_operation`).
         if !type_forbids_memcpy && dst_element_size == src_element_size {
             let const_len = const_count.and_then(|c| c.checked_mul(u64::from(dst_element_size)));
-            self.raw_bulk_memory_operation(
+            return self.raw_bulk_memory_operation(
                 builder,
                 BulkOp::MemoryCopy {
                     dst: dst_elem_addr,
@@ -4686,7 +4551,6 @@ impl FuncEnvironment<'_> {
                     dst_entity,
                 },
             );
-            return Ok(());
         }
 
         // For other copies, this is a per-element loop. Use the helper to
@@ -4971,13 +4835,6 @@ impl FuncEnvironment<'_> {
         builder.insert_block_after(backwards_block, forward_block);
         builder.insert_block_after(done_block, backwards_block);
 
-        // Update our local fuel counter, if enabled, before entering the loops
-        // below. This zeros out `self.fuel_consumed` so we don't consume
-        // previous fuel on each iteration of the loop.
-        if self.tunables.consume_fuel {
-            self.fuel_increment_var(builder);
-        }
-
         // Terminate `current_block` by testing to see if we're copying any
         // elements at all.
         builder
@@ -5067,11 +4924,6 @@ impl FuncEnvironment<'_> {
         let src_cur = builder.append_block_param(forward_block, self.pointer_type());
         let src_index = builder.append_block_param(forward_block, src_index_ty);
         let forward_keepalives = append_keepalive_params(builder, forward_block);
-        // Consume a single unit of fuel on each iteration of the loop.
-        if self.tunables.consume_fuel {
-            self.fuel_consumed += 1;
-        }
-        self.translate_loop_header(builder)?;
         copy_one(self, builder, dst_cur, src_cur, src_index)?;
         let dst_next = builder
             .ins()
@@ -5097,10 +4949,6 @@ impl FuncEnvironment<'_> {
         let src_cur = builder.append_block_param(backwards_block, self.pointer_type());
         let src_index = builder.append_block_param(backwards_block, src_index_ty);
         let backward_keepalives = append_keepalive_params(builder, backwards_block);
-        if self.tunables.consume_fuel {
-            self.fuel_consumed += 1;
-        }
-        self.translate_loop_header(builder)?;
         let dst_cur = {
             let size = builder
                 .ins()
@@ -5151,6 +4999,12 @@ impl FuncEnvironment<'_> {
         src: ir::Value,
         len: ir::Value,
     ) -> WasmResult<()> {
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .table_init_per_element;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_copy(
             builder,
             CheckedEntity::Table {
@@ -5224,6 +5078,78 @@ impl FuncEnvironment<'_> {
         Ok(builder.ins().ireduce(ir::types::I32, ret))
     }
 
+    /// Translation prefix before bulk operations such as `memory.copy`.
+    ///
+    /// Takes a dynamic value `units` for the size of the operation as well as
+    /// a `cost_per_unit` configured for this operation. If fuel is enabled
+    /// this fuel will be consumed, and if epochs are enabled then an epoch
+    /// check happens. If neither epochs nor fuel are enabled this is a noop.
+    fn pre_translate_bulk_op(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        units: ir::Value,
+        cost_per_unit: u8,
+    ) -> WasmResult<()> {
+        let const_units =
+            Self::value_as_const_int(builder, units).map(|c| i64::try_from(c).unwrap_or(i64::MAX));
+
+        if self.tunables.consume_fuel && cost_per_unit > 0 {
+            match const_units {
+                // Fold constant costs directly into internal state.
+                Some(units) => {
+                    self.fuel_consumed = self
+                        .fuel_consumed
+                        .saturating_add(units.saturating_mul(i64::from(cost_per_unit)))
+                }
+
+                None => {
+                    // Note that fuel is always a 64-bit counter.
+                    //
+                    // Also note that the cost is clamped to `i64::MAX` to
+                    // prevent fuel counter overflows since `cost` is otherwise
+                    // an untrusted value.
+                    let units_clamped64 = match builder.func.dfg.value_type(units) {
+                        ir::types::I32 => {
+                            let units64 = builder.ins().uextend(ir::types::I64, units);
+                            builder.ins().imul_imm_u(units64, i64::from(cost_per_unit))
+                        }
+                        ir::types::I64 => {
+                            let fuel = builder.ins().imul_imm_u(units, i64::from(cost_per_unit));
+                            let max = builder.ins().iconst(ir::types::I64, i64::MAX);
+                            let max_units = builder
+                                .ins()
+                                .iconst(I64, i64::MAX / i64::from(cost_per_unit));
+                            let saturate =
+                                builder
+                                    .ins()
+                                    .icmp(IntCC::UnsignedGreaterThan, units, max_units);
+                            builder.ins().select(saturate, max, fuel)
+                        }
+                        _ => unreachable!(),
+                    };
+                    self.fuel_increment_var(builder);
+                    let fuel = builder.use_var(self.fuel_var);
+                    let fuel = builder.ins().iadd(fuel, units_clamped64);
+                    builder.def_var(self.fuel_var, fuel);
+                }
+            }
+        }
+
+        // Skip explicit fuel/epoch checks for operations which are
+        // subjectively, and statically, considered cheap.
+        const SMALL_BULK_OP_COST: i64 = 128;
+        if let Some(units) = const_units
+            && let Some(cost) = units.checked_mul(i64::from(cost_per_unit))
+            && cost <= SMALL_BULK_OP_COST
+        {
+            return Ok(());
+        }
+
+        // This isn't a loop header but for fuel/epoch purposes it's the same
+        // thing.
+        self.translate_loop_header(builder)
+    }
+
     pub fn translate_loop_header(&mut self, builder: &mut FunctionBuilder) -> WasmResult<()> {
         // Additionally if enabled check how much fuel we have remaining to see
         // if we've run out by this point.
@@ -5279,6 +5205,15 @@ impl FuncEnvironment<'_> {
             self.update_state_slot_stack(validator, builder)?;
         }
         Ok(())
+    }
+
+    /// Hook invoked at the start of a catch block for a `try_table`,
+    /// i.e. the block that control lands in when a `try_call` returns
+    /// along its exceptional edge.
+    pub fn on_catch_block_entry(&mut self, builder: &mut FunctionBuilder) {
+        if self.tunables.consume_fuel {
+            self.fuel_load_into_var(builder);
+        }
     }
 
     pub fn before_unconditionally_trapping_memory_access(&mut self, builder: &mut FunctionBuilder) {
@@ -5393,13 +5328,51 @@ impl FuncEnvironment<'_> {
         )
     }
 
+    pub fn translate_resume_throw_ref(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        type_index: u32,
+        exnref: ir::Value,
+        contobj: ir::Value,
+        resumetable: &[(u32, Option<ir::Block>)],
+    ) -> WasmResult<Vec<ir::Value>> {
+        stack_switching::instructions::translate_resume_throw_ref(
+            self,
+            builder,
+            type_index,
+            exnref,
+            contobj,
+            resumetable,
+        )
+    }
+
+    pub fn translate_resume_throw(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        type_index: u32,
+        tag_index: TagIndex,
+        exception_args: &[ir::Value],
+        contobj: ir::Value,
+        resumetable: &[(u32, Option<ir::Block>)],
+    ) -> WasmResult<Vec<ir::Value>> {
+        stack_switching::instructions::translate_resume_throw(
+            self,
+            builder,
+            type_index,
+            tag_index,
+            exception_args,
+            contobj,
+            resumetable,
+        )
+    }
+
     pub fn translate_suspend(
         &mut self,
         builder: &mut FunctionBuilder<'_>,
         tag_index: u32,
         suspend_args: &[ir::Value],
         tag_return_types: &[ir::Type],
-    ) -> Vec<ir::Value> {
+    ) -> WasmResult<Vec<ir::Value>> {
         stack_switching::instructions::translate_suspend(
             self,
             builder,
@@ -6072,6 +6045,12 @@ impl FuncEnvironment<'_> {
             index_type_to_ir_type(ty.idx_type),
             ty.limits.min.cast_signed(),
         );
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .table_fill_per_element;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_fill(
             builder,
             CheckedEntity::Table {
@@ -6111,6 +6090,12 @@ impl FuncEnvironment<'_> {
             offset,
             segment_len,
         )?;
+        let cost = self
+            .tunables
+            .operator_cost
+            .variable()
+            .table_init_per_element;
+        self.pre_translate_bulk_op(builder, segment_len, cost)?;
 
         // Re-use the `table.set` translation for making this a simple function
         // to define. That re-executes the bounds check which is a bit
@@ -6182,6 +6167,8 @@ impl FuncEnvironment<'_> {
         // Model the initialization here as a `memory.init`.
         let len = self.load_runtime_data_length(builder, data);
         let start = builder.ins().iconst(I32, 0);
+        let cost = self.tunables.operator_cost.variable().memory_init_per_byte;
+        self.pre_translate_bulk_op(builder, len, cost)?;
         self.translate_entity_copy(builder, memory, data, offset, start, len)?;
 
         // Finalize control-flow for the `MemorySegmentOffset::Static` case

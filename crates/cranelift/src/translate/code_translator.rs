@@ -71,7 +71,6 @@
 //!   <https://github.com/bytecodealliance/cranelift/pull/1236>
 //!     ("Relax verification to allow I8X16 to act as a default vector type")
 
-use crate::Reachability;
 use crate::bounds_checks::{BoundsCheck, bounds_check_and_compute_addr};
 use crate::func_environ::{Extension, FuncEnvironment};
 use crate::translate::TargetEnvironment;
@@ -81,6 +80,7 @@ use crate::translate::translation_utils::{
     block_with_params, blocktype_params_results, f32_translation, f64_translation, set_block_params,
 };
 use crate::trap::TranslateTrap;
+use crate::{MAX_BR_TABLE_TARGETS, Reachability};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_codegen::ir::{
@@ -126,6 +126,18 @@ pub fn translate_operator(
     environ: &mut FuncEnvironment<'_>,
 ) -> WasmResult<()> {
     log::trace!("Translating Wasm opcode: {op:?}");
+
+    // Check implementation limits before anything else so that they are
+    // enforced regardless of whether this operator is reachable.
+    if let Operator::BrTable { targets } = op {
+        if targets.len() > MAX_BR_TABLE_TARGETS {
+            return Err(wasm_unsupported!(
+                "`br_table` has {} targets, which exceeds the implementation limit of {}",
+                targets.len(),
+                MAX_BR_TABLE_TARGETS
+            ));
+        }
+    }
 
     if !environ.is_reachable() {
         translate_unreachable_operator(&op, builder, environ)?;
@@ -3191,7 +3203,7 @@ pub fn translate_operator(
             let param_count = params.len();
 
             let return_values =
-                environ.translate_suspend(builder, tag_index.as_u32(), &params, &return_types);
+                environ.translate_suspend(builder, tag_index.as_u32(), &params, &return_types)?;
 
             environ.stacks.popn(param_count);
             environ.stacks.pushn(&return_values);
@@ -3235,14 +3247,78 @@ pub fn translate_operator(
             environ.stacks.pushn(&cont_return_vals);
         }
         Operator::ResumeThrow {
-            cont_type_index: _,
-            tag_index: _,
-            resume_table: _,
+            cont_type_index,
+            tag_index,
+            resume_table: wasm_resume_table,
         } => {
-            // TODO(10248) This depends on exception handling
-            return Err(wasmtime_environ::WasmError::Unsupported(
-                "resume.throw instructions not supported, yet".to_string(),
-            ));
+            let mut clif_resume_table = vec![];
+            for handle in &wasm_resume_table.handlers {
+                match handle {
+                    wasmparser::Handle::OnLabel { tag, label } => {
+                        let i = environ.stacks.control_stack.len() - 1 - (*label as usize);
+                        let frame = &mut environ.stacks.control_stack[i];
+                        frame.set_branched_to_exit();
+                        clif_resume_table.push((*tag, Some(frame.br_destination())));
+                    }
+                    wasmparser::Handle::OnSwitch { tag } => {
+                        clif_resume_table.push((*tag, None));
+                    }
+                }
+            }
+
+            let cont_type_index = TypeIndex::from_u32(*cont_type_index);
+            let tag_index = TagIndex::from_u32(*tag_index);
+            let arity = environ.tag_params(tag_index).len();
+            let (contobj, exception_args) = environ.stacks.peekn(arity + 1).split_last().unwrap();
+            let contobj = *contobj;
+            let exception_args = exception_args.to_vec();
+            let cont_return_vals = environ.translate_resume_throw(
+                builder,
+                cont_type_index.as_u32(),
+                tag_index,
+                &exception_args,
+                contobj,
+                &clif_resume_table,
+            )?;
+
+            environ.stacks.popn(arity + 1);
+            environ.stacks.pushn(&cont_return_vals);
+        }
+        Operator::ResumeThrowRef {
+            cont_type_index,
+            resume_table: wasm_resume_table,
+        } => {
+            let mut clif_resume_table = vec![];
+            for handle in &wasm_resume_table.handlers {
+                match handle {
+                    wasmparser::Handle::OnLabel { tag, label } => {
+                        let i = environ.stacks.control_stack.len() - 1 - (*label as usize);
+                        let frame = &mut environ.stacks.control_stack[i];
+                        frame.set_branched_to_exit();
+                        clif_resume_table.push((*tag, Some(frame.br_destination())));
+                    }
+                    wasmparser::Handle::OnSwitch { tag } => {
+                        clif_resume_table.push((*tag, None));
+                    }
+                }
+            }
+
+            let cont_type_index = TypeIndex::from_u32(*cont_type_index);
+            // The validator leaves the continuation on top of the exception
+            // reference.
+            let operands = environ.stacks.peekn(2);
+            let exnref = operands[0];
+            let contobj = operands[1];
+            let cont_return_vals = environ.translate_resume_throw_ref(
+                builder,
+                cont_type_index.as_u32(),
+                exnref,
+                contobj,
+                &clif_resume_table,
+            )?;
+
+            environ.stacks.popn(2);
+            environ.stacks.pushn(&cont_return_vals);
         }
         Operator::Switch {
             cont_type_index,
@@ -4566,6 +4642,7 @@ fn create_catch_block(
     let block = builder.create_block();
     let exn_ref = builder.append_block_param(block, exn_payload_ty);
     builder.switch_to_block(block);
+    environ.on_catch_block_entry(builder);
     debug_assert!(exn_ref_ty.bits() <= exn_payload_ty.bits());
     let exn_ref = if exn_ref_ty.bits() < exn_payload_ty.bits() {
         builder.ins().ireduce(exn_ref_ty, exn_ref)

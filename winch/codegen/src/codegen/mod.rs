@@ -162,9 +162,9 @@ where
         // compares against the store's real limit instead, and the resumable
         // check in `emit_body` observes the sentinel.
         let stack_limit_offset = if self.tunables.stack_limit_interruption {
-            self.env.vmoffsets.ptr.vmstore_context_real_stack_limit()
+            self.env.vmoffsets.ptr.vm_store_context().real_stack_limit()
         } else {
-            self.env.vmoffsets.ptr.vmstore_context_stack_limit()
+            self.env.vmoffsets.ptr.vm_store_context().stack_limit()
         };
         self.masm.prologue(vmctx, stack_limit_offset)?;
 
@@ -370,6 +370,7 @@ where
                     fn $visit(&mut self $($(,$arg: $argty)*)?) -> Self::Output {
                         self.0.$visit($($($arg.clone()),*)?)?;
                         let op = Operator::$op $({ $($arg: $arg.clone()),* })?;
+                        check_impl_limits(&op)?;
                         if self.1.visit(&op) {
                             self.1.before_visit_op(&op, self.2)?;
                             let res = self.1.$visit($($($arg),*)?)?;
@@ -381,6 +382,17 @@ where
                     }
                 )*
             };
+        }
+
+        /// Check implementation limits that are not (yet) enforced by
+        /// validation. This is done regardless of reachability.
+        fn check_impl_limits(op: &Operator) -> Result<()> {
+            if let Operator::BrTable { targets } = op {
+                if targets.len() > wasmtime_cranelift::MAX_BR_TABLE_TARGETS {
+                    bail!(CodeGenError::br_table_too_large(targets.len()));
+                }
+            }
+            Ok(())
         }
 
         fn visit_op_when_unreachable(op: &Operator) -> bool {
@@ -477,7 +489,7 @@ where
             .checked_mul(sig_index_bytes.into())
             .unwrap();
         let signatures_base_offset = self.env.vmoffsets.ptr.vmctx_type_ids_array();
-        let funcref_sig_offset = self.env.vmoffsets.ptr.vm_func_ref_type_index();
+        let funcref_sig_offset = self.env.vmoffsets.ptr.vm_func_ref().type_index();
         // Get the caller id.
         let caller_id = self.context.any_gpr(self.masm)?;
 
@@ -2109,7 +2121,7 @@ where
     /// `VMStoreContext`.
     fn emit_load_fuel_consumed(&mut self, fuel_reg: Reg) -> Result<()> {
         let store_context_offset = self.env.vmoffsets.ptr.vmctx_store_context();
-        let fuel_offset = self.env.vmoffsets.ptr.vmstore_context_fuel_consumed();
+        let fuel_offset = self.env.vmoffsets.ptr.vm_store_context().fuel_consumed();
         self.masm.load_ptr(
             self.masm
                 .address_at_vmctx(u32::from(store_context_offset))?,
@@ -2205,7 +2217,7 @@ where
         )??;
 
         let store_context_offset = self.env.vmoffsets.ptr.vmctx_store_context();
-        let stack_limit_offset = self.env.vmoffsets.ptr.vmstore_context_stack_limit();
+        let stack_limit_offset = self.env.vmoffsets.ptr.vm_store_context().stack_limit();
         self.masm.load_ptr(
             self.masm
                 .address_at_vmctx(u32::from(store_context_offset))?,
@@ -2256,7 +2268,7 @@ where
     ) -> Result<()> {
         let epoch_ptr_offset = self.env.vmoffsets.ptr.vmctx_epoch_ptr();
         let store_context_offset = self.env.vmoffsets.ptr.vmctx_store_context();
-        let epoch_deadline_offset = self.env.vmoffsets.ptr.vmstore_context_epoch_deadline();
+        let epoch_deadline_offset = self.env.vmoffsets.ptr.vm_store_context().epoch_deadline();
 
         // Load the current epoch value into `epoch_counter_var`.
         self.masm.load_ptr(
@@ -2297,7 +2309,7 @@ where
         }
 
         let store_context_offset = self.env.vmoffsets.ptr.vmctx_store_context();
-        let fuel_offset = self.env.vmoffsets.ptr.vmstore_context_fuel_consumed();
+        let fuel_offset = self.env.vmoffsets.ptr.vm_store_context().fuel_consumed();
         let limits_reg = self.context.any_gpr(self.masm)?;
 
         // Load `VMStoreContext` into the `limits_reg` reg.
@@ -2415,14 +2427,24 @@ where
         let heap = self.env.resolve_heap(memory_index);
         // We need to pop-push the operand to compute the address before passing control over to
         // masm, because some architectures may have specific requirements for the registers used
-        // in some atomic operations.
+        // in some atomic operations. The computed address is pushed back to the context's stack
+        // too, rather than handed over as a register, since registers that are not tracked by the
+        // value stack can't be spilled, so an untracked address register would make any request
+        // for a fixed register fail if the address happened to be allocated to it. For this
+        // reason, the address is pushed as a register to be dereferenced prior to emission, after
+        // all the ISA-specifc constraints have been solved.
         let operand = self.context.pop_to_reg(self.masm, None)?;
         if let Some(addr) = self.emit_compute_heap_address_align_checked(&heap, arg, size)? {
-            let src = self.masm.address_at_reg(addr, 0)?;
+            self.context
+                .stack
+                .push(TypedReg::new(self.env.ptr_type(), addr).into());
             self.context.stack.push(operand.into());
             self.masm
-                .atomic_rmw(&mut self.context, src, size, op, UNTRUSTED_FLAGS, extend)?;
-            self.context.free_reg(addr);
+                .atomic_rmw(&mut self.context, size, op, UNTRUSTED_FLAGS, extend)?;
+        } else {
+            // Ensure that the operand register is not left allocated if the access was proven to
+            // be out of bounds at compile time.
+            self.context.free_reg(operand);
         }
 
         Ok(())
@@ -2446,10 +2468,15 @@ where
         // with regard to the registers used for some arguments, so we
         // need to pass the context to the masm. To solve this issue,
         // we pop the two first arguments from the stack, compute the
-        // address, push back the arguments, and hand over the control
-        // to masm. The implementer of `atomic_cas` can expect to find
-        // `expected` and `replacement` at the top the context's
-        // stack.
+        // address, push back the address and the arguments, and hand
+        // over the control to masm. The implementer of `atomic_cas`
+        // can expect to find `address`, `expected` and `replacement`
+        // at the top the context's stack.
+        //
+        // The computed address is pushed back to the stack as a
+        // register, rather than handed over directly, so that the
+        // register allocator is able to spill it if the target
+        // requires a fixed register.
 
         let replacement = self.context.pop_to_reg(self.masm, None)?;
         let expected = self.context.pop_to_reg(self.masm, None)?;
@@ -2457,14 +2484,19 @@ where
         let memory_index = MemoryIndex::from_u32(arg.memory);
         let heap = self.env.resolve_heap(memory_index);
         if let Some(addr) = self.emit_compute_heap_address_align_checked(&heap, arg, size)? {
+            self.context
+                .stack
+                .push(TypedReg::new(self.env.ptr_type(), addr).into());
             self.context.stack.push(expected.into());
             self.context.stack.push(replacement.into());
 
-            let src = self.masm.address_at_reg(addr, 0)?;
             self.masm
-                .atomic_cas(&mut self.context, src, size, UNTRUSTED_FLAGS, extend)?;
-
-            self.context.free_reg(addr);
+                .atomic_cas(&mut self.context, size, UNTRUSTED_FLAGS, extend)?;
+        } else {
+            // Ensure that the argument registers are not left allocated if the access was proven
+            // to be out of bounds at compile time.
+            self.context.free_reg(expected);
+            self.context.free_reg(replacement);
         }
         Ok(())
     }
@@ -2586,8 +2618,10 @@ where
             // the vmctx itself.
             None => {
                 let vmimport = self.env.vmoffsets.vmctx_vmmemory_import(mem);
-                let vmctx_offset = vmimport + u32::from(self.env.vmoffsets.vmmemory_import_vmctx());
-                let index_offset = vmimport + u32::from(self.env.vmoffsets.vmmemory_import_index());
+                let vmctx_offset =
+                    vmimport + u32::from(self.env.vmoffsets.ptr.vm_memory_import().vmctx());
+                let index_offset =
+                    vmimport + u32::from(self.env.vmoffsets.ptr.vm_memory_import().index());
                 let index_addr = self.masm.address_at_vmctx(index_offset)?;
                 let index_dst = self.context.reg_for_class(RegClass::Int, self.masm)?;
                 self.masm
@@ -2616,8 +2650,10 @@ where
             }
             None => {
                 let vmimport = self.env.vmoffsets.vmctx_vmtable_import(table);
-                let vmctx_offset = vmimport + u32::from(self.env.vmoffsets.vmtable_import_vmctx());
-                let index_offset = vmimport + u32::from(self.env.vmoffsets.vmtable_import_index());
+                let vmctx_offset =
+                    vmimport + u32::from(self.env.vmoffsets.ptr.vm_table_import().vmctx());
+                let index_offset =
+                    vmimport + u32::from(self.env.vmoffsets.ptr.vm_table_import().index());
                 let index_addr = self.masm.address_at_vmctx(index_offset)?;
                 let index_dst = self.context.reg_for_class(RegClass::Int, self.masm)?;
                 self.masm

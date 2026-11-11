@@ -37,9 +37,15 @@ pub use request_options::*;
 /// header.
 #[cfg(any(feature = "p2", feature = "p3"))]
 fn get_content_length(headers: &http::HeaderMap) -> wasmtime::Result<Option<u64>> {
-    let Some(v) = headers.get(header::CONTENT_LENGTH) else {
+    let mut values = headers.get_all(header::CONTENT_LENGTH).iter();
+    let Some(v) = values.next() else {
         return Ok(None);
     };
+    // `FieldMap` rejects multiple `Content-Length` values, but double-check
+    // here since the framing of the body depends on there being exactly one.
+    if values.next().is_some() {
+        wasmtime::bail!("multiple `content-length` header values");
+    }
     let v = v.to_str()?;
     // RFC 9110 defines `Content-Length` as `1*DIGIT`. `u64`'s `FromStr` is more
     // lenient and also accepts a leading `+`, so reject anything that isn't a
@@ -49,6 +55,32 @@ fn get_content_length(headers: &http::HeaderMap) -> wasmtime::Result<Option<u64>
     }
     let v = v.parse()?;
     Ok(Some(v))
+}
+
+/// Parse the specified string as an `http::uri::PathAndQuery`, if possible.
+///
+/// https://datatracker.ietf.org/doc/html/rfc3986#section-3.3 says:
+///
+/// > If a URI contains an authority component, then the path component must
+/// > either be empty or begin with a slash ("/") character.
+///
+/// `PathAndQuery` doesn't check this: it accepts `http://example.com/`, `*`,
+/// and `x`. Those are rejected here, as they would otherwise end up verbatim in
+/// the request line of outgoing requests, and an absolute URI there addresses
+/// the request to a different host than the one it's sent to.
+#[cfg(any(feature = "p2", feature = "p3"))]
+fn parse_path_with_query(path_with_query: &str) -> Option<http::uri::PathAndQuery> {
+    if !(path_with_query.is_empty()
+        || path_with_query.starts_with('/')
+        || path_with_query.starts_with('?'))
+    {
+        return None;
+    }
+    http::uri::Builder::new()
+        .path_and_query(path_with_query)
+        .build()
+        .ok()
+        .and_then(|uri| uri.path_and_query().cloned())
 }
 
 #[cfg(all(test, any(feature = "p2", feature = "p3")))]
@@ -76,6 +108,11 @@ mod content_length_tests {
         assert!(get_content_length(&headers("-5")).is_err());
         assert!(get_content_length(&headers(" 5")).is_err());
         assert!(get_content_length(&headers("")).is_err());
+
+        // Duplicate content-length definition is forbidden
+        let mut map = headers("5");
+        map.append(header::CONTENT_LENGTH, HeaderValue::from_static("5"));
+        assert!(get_content_length(&map).is_err());
     }
 }
 

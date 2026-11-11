@@ -26,7 +26,7 @@ fn p2_http_outbound_request_get() -> Result<()> {
 
 #[test_log::test]
 fn p2_http_outbound_request_timeout() -> Result<()> {
-    let server = Server::http1(1)?;
+    let server = Server::http1(3)?;
     run(P2_HTTP_OUTBOUND_REQUEST_TIMEOUT_COMPONENT, &server)
 }
 
@@ -40,6 +40,12 @@ fn p2_http_outbound_request_post() -> Result<()> {
 fn p2_http_outbound_request_large_post() -> Result<()> {
     let server = Server::http1(1)?;
     run(P2_HTTP_OUTBOUND_REQUEST_LARGE_POST_COMPONENT, &server)
+}
+
+#[test_log::test]
+fn p2_http_outbound_request_long_path() -> Result<()> {
+    let server = Server::http1(1)?;
+    run(P2_HTTP_OUTBOUND_REQUEST_LONG_PATH_COMPONENT, &server)
 }
 
 #[test_log::test]
@@ -100,10 +106,38 @@ fn p2_http_outbound_request_content_length() -> Result<()> {
 }
 
 #[test_log::test]
+fn p2_http_outbound_request_forward_duplicate_content_length() -> Result<()> {
+    // `run` blocks on its own runtime so this can't be driven by another one,
+    // but nothing here awaits anything, so a single poll completes it.
+    crate::shared::forward_duplicate_content_length(async |server| {
+        run(
+            P2_HTTP_OUTBOUND_REQUEST_FORWARD_DUPLICATE_CONTENT_LENGTH_COMPONENT,
+            server,
+        )
+    })
+    .now_or_never()
+    .expect("future completes without awaiting")
+}
+
+#[test_log::test]
 fn p2_http_outbound_request_missing_path_and_query() -> Result<()> {
     let server = Server::http1(1)?;
     run(
         P2_HTTP_OUTBOUND_REQUEST_MISSING_PATH_AND_QUERY_COMPONENT,
         &server,
     )
+}
+
+#[test_log::test]
+fn p2_http_outbound_body_write_backpressure() -> Result<()> {
+    let server = Server::http1(0)?;
+    let e = run(P2_HTTP_OUTBOUND_BODY_WRITE_BACKPRESSURE_COMPONENT, &server)
+        .err()
+        .expect("guest execution should trap");
+    let e_debug = format!("{e:?}");
+    assert!(
+        e_debug.contains("write exceeded budget"),
+        "expected trap to contain 'write exceeded budget': {e:?}"
+    );
+    Ok(())
 }

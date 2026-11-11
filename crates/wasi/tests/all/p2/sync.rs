@@ -8,6 +8,14 @@ use wasmtime_wasi::p2::add_to_linker_sync;
 use wasmtime_wasi::p2::bindings::sync::Command;
 
 fn run(path: &str, with_builder: impl Fn(&mut WasiCtxBuilder)) -> Result<()> {
+    run_with_workspace_setup(path, |_| Ok(()), with_builder)
+}
+
+fn run_with_workspace_setup(
+    path: &str,
+    setup: impl Fn(&Path) -> Result<()>,
+    with_builder: impl Fn(&mut WasiCtxBuilder),
+) -> Result<()> {
     let path = Path::new(path);
     let name = path.file_stem().unwrap().to_str().unwrap();
     let engine = test_programs_artifacts::engine(|_| {});
@@ -17,7 +25,7 @@ fn run(path: &str, with_builder: impl Fn(&mut WasiCtxBuilder)) -> Result<()> {
     let component = Component::from_file(&engine, path)?;
 
     for blocking in [false, true] {
-        let (mut store, _td) = Ctx::new(&engine, name, |builder| {
+        let (mut store, _td) = Ctx::new_with_workspace_setup(&engine, name, &setup, |builder| {
             with_builder(builder);
             builder.allow_blocking_current_thread(blocking);
             MyWasiCtx::new(builder.build())
@@ -75,6 +83,15 @@ fn p1_fd_filestat_get() {
 #[test_log::test]
 fn p1_fd_filestat_set() {
     run(P1_FD_FILESTAT_SET_COMPONENT, |_| {}).unwrap()
+}
+#[test_log::test]
+fn p1_stat_extreme_host_mtime() {
+    run_with_workspace_setup(
+        P1_STAT_EXTREME_HOST_MTIME_COMPONENT,
+        crate::store::prepare_extreme_mtime_fixture,
+        |_| {},
+    )
+    .unwrap()
 }
 #[test_log::test]
 fn p1_fd_flags_set() {
@@ -184,6 +201,17 @@ fn p1_poll_oneoff_stdio() {
 fn p1_readlink() {
     run(P1_READLINK_COMPONENT, |_| {}).unwrap()
 }
+
+#[test_log::test]
+fn p1_path_rename_trailing_slashes() {
+    let fixture = crate::store::SandboxFixture::new().unwrap();
+    run(P1_PATH_RENAME_TRAILING_SLASHES_COMPONENT, |b| {
+        fixture.configure_wasi(b)
+    })
+    .expect("run guest");
+    fixture.assert_secure();
+}
+
 #[test_log::test]
 fn p1_remove_directory() {
     run(P1_REMOVE_DIRECTORY_COMPONENT, |_| {}).unwrap()
@@ -317,12 +345,29 @@ fn p2_udp_states() {
     run(P2_UDP_STATES_COMPONENT, |_| {}).unwrap()
 }
 #[test_log::test]
+fn p2_udp_stream() {
+    run(P2_UDP_STREAM_COMPONENT, |_| {}).unwrap()
+}
+#[test_log::test]
 fn p2_udp_bind() {
     run(P2_UDP_BIND_COMPONENT, |_| {}).unwrap()
 }
 #[test_log::test]
 fn p2_udp_connect() {
     run(P2_UDP_CONNECT_COMPONENT, |_| {}).unwrap()
+}
+#[test_log::test]
+// This test is flaky on Windows.  It consistently passes when run by itself but
+// consistently fails when run in combination with the `p2::async_` variation,
+// and we've thus far been unable to determine the reason.
+#[cfg_attr(windows, ignore = "This test is flaky on Windows.")]
+// This test is flaky on macOS in CI. One possible reason is that this relies on
+// a port being closed which concurrent tests can otherwise re-bind. Another
+// reason is that maybe this is just flaky on macOS (LLMs say something about
+// the OS rate-limiting ICMP messages if they're to be believed).
+#[cfg_attr(target_os = "macos", ignore = "This test is flaky on macOS.")]
+fn p2_udp_send_to_closed_receiver() {
+    run(P2_UDP_SEND_TO_CLOSED_RECEIVER_COMPONENT, |_| {}).unwrap()
 }
 #[test_log::test]
 fn p2_stream_pollable_correct() {
@@ -364,6 +409,10 @@ fn p2_udp_send_too_much() {
         "unpermitted: argument exceeds permitted size"
     )
 }
+#[test_log::test]
+fn p2_file_settime_overflow() {
+    run(P2_FILE_SETTIME_OVERFLOW_COMPONENT, |_| {}).unwrap()
+}
 
 #[test_log::test]
 fn p1_file_truncation_readonly() {
@@ -376,7 +425,7 @@ fn p2_file_truncation_readonly() {
 
 fn run_with_readonly_testfile(component_path: &str) {
     use std::path::PathBuf;
-    use wasmtime_wasi::{DirPerms, FilePerms};
+    use wasmtime_wasi::FsPerms;
 
     let prefix = "wasi_components_ro_";
     let tempdir = tempfile::Builder::new()
@@ -390,13 +439,8 @@ fn run_with_readonly_testfile(component_path: &str) {
     std::fs::write(&file, EXPECTED_CONTENTS).expect("write read only test file");
 
     run(component_path, |b| {
-        b.preopened_dir(
-            tempdir.path(),
-            "readonly",
-            DirPerms::READ | DirPerms::MUTATE,
-            FilePerms::READ,
-        )
-        .unwrap();
+        b.preopened_dir(tempdir.path(), "readonly", FsPerms::ReadOnly)
+            .unwrap();
     })
     .expect("run guest");
 
@@ -422,43 +466,35 @@ fn p2_file_rename_across_perms() {
 }
 
 #[test_log::test]
+fn p2_path_rename_trailing_slashes() {
+    let fixture = crate::store::SandboxFixture::new().unwrap();
+    run(P2_PATH_RENAME_TRAILING_SLASHES_COMPONENT, |b| {
+        fixture.configure_wasi(b)
+    })
+    .expect("run guest");
+    fixture.assert_secure();
+}
+
+#[test_log::test]
 fn p2_file_stream_not_permitted() {
     file_stream_not_permitted(P2_FILE_STREAM_NOT_PERMITTED_COMPONENT)
 }
 
 fn file_stream_not_permitted(component_path: &str) {
-    use wasmtime_wasi::{DirPerms, FilePerms};
+    use wasmtime_wasi::FsPerms;
 
     let readonly = tempfile::Builder::new()
         .prefix("wasi_components_stream_np_ro_")
         .tempdir()
         .expect("create readonly tempdir");
-    let writeonly = tempfile::Builder::new()
-        .prefix("wasi_components_stream_np_wo_")
-        .tempdir()
-        .expect("create writeonly tempdir");
 
     const RO_CONTENTS: &[u8] = b"stream permission test\n";
     std::fs::write(readonly.path().join("stream-perms.txt"), RO_CONTENTS)
         .expect("write readonly test file");
-    std::fs::write(writeonly.path().join("stream-write.txt"), b"")
-        .expect("create writeonly test file");
 
     run(component_path, |b| {
-        b.preopened_dir(
-            readonly.path(),
-            "readonly",
-            DirPerms::READ | DirPerms::MUTATE,
-            FilePerms::READ,
-        )
-        .unwrap();
-        b.preopened_dir(
-            writeonly.path(),
-            "writeonly",
-            DirPerms::READ | DirPerms::MUTATE,
-            FilePerms::WRITE,
-        )
-        .unwrap();
+        b.preopened_dir(readonly.path(), "readonly", FsPerms::ReadOnly)
+            .unwrap();
     })
     .expect("run p2_file_stream_not_permitted guest");
 }

@@ -575,6 +575,10 @@ wasmtime_option_group! {
         pub max_resources: Option<usize>,
         /// Fuel to use for all hostcalls to limit guest<->host data transfer.
         pub hostcall_fuel: Option<usize>,
+        /// Maximum number of simultaneously-live component-model handles (e.g.
+        /// resources, streams, futures) per store; allocating past it traps.
+        /// (default: 100000)
+        pub max_component_handles: Option<usize>,
         /// Maximum value, in bytes, for a wasi-random 0.2
         /// `get{,-insecure}-random-bytes` `len` parameter. Calls with a value
         /// exceeding this limit will trap.
@@ -1290,6 +1294,7 @@ impl CommonOptions {
             ("component-model", component_model_map, wasm_component_model_map)
             ("component-model", component_model_fixed_length_lists, wasm_component_model_fixed_length_lists)
             ("component-model", component_model_implements, wasm_component_model_implements)
+            ("component-model", component_model_memory64, wasm_component_model_memory64)
             ("threads", threads, wasm_threads)
             ("gc", gc, wasm_gc)
             ("gc", reference_types, wasm_reference_types)

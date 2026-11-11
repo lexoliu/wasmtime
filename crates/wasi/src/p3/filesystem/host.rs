@@ -7,7 +7,6 @@ use crate::p3::bindings::filesystem::types::{
 };
 use crate::p3::filesystem::{FilesystemError, FilesystemResult, preopens};
 use crate::p3::{DEFAULT_BUFFER_CAPACITY, FallibleIteratorProducer};
-use crate::{DirPerms, FilePerms};
 use bytes::BytesMut;
 use core::pin::Pin;
 use core::task::{Context, Poll, ready};
@@ -98,16 +97,28 @@ impl<T> AccessorExt for Accessor<T, WasiFilesystem> {
 }
 
 fn systemtime_from(t: system_clock::Instant) -> Result<std::time::SystemTime, ErrorCode> {
-    if let Ok(seconds) = t.seconds.try_into() {
+    if let Ok(seconds) = <i64 as TryInto<u64>>::try_into(t.seconds) {
+        // Catch nanoseconds-into-seconds Overflow error explicitly:
+        // unfortunately, Duration::new panics when input overflows
+        let duration = core::time::Duration::new(
+            seconds
+                .checked_add(u64::from(t.nanoseconds / 1_000_000_000))
+                .ok_or(ErrorCode::Overflow)?,
+            t.nanoseconds % 1_000_000_000,
+        );
         std::time::SystemTime::UNIX_EPOCH
-            .checked_add(core::time::Duration::new(seconds, t.nanoseconds))
+            .checked_add(duration)
             .ok_or(ErrorCode::Overflow)
     } else {
+        let duration = core::time::Duration::new(
+            t.seconds
+                .unsigned_abs()
+                .checked_add(u64::from(t.nanoseconds / 1_000_000_000))
+                .ok_or(ErrorCode::Overflow)?,
+            t.nanoseconds % 1_000_000_000,
+        );
         std::time::SystemTime::UNIX_EPOCH
-            .checked_sub(core::time::Duration::new(
-                t.seconds.unsigned_abs(),
-                t.nanoseconds,
-            ))
+            .checked_sub(duration)
             .ok_or(ErrorCode::Overflow)
     }
 }
@@ -198,7 +209,7 @@ impl<D> StreamProducer<D> for ReadStreamProducer {
             let file = Arc::clone(me.file.as_file());
             let offset = me.offset;
             spawn_blocking(move || {
-                sys::read_at_cursor_unspecified(file, &mut buf, offset).map(|n| {
+                sys::read_at_cursor_unspecified(&file, &mut buf, offset).map(|n| {
                     buf.truncate(n);
                     buf
                 })
@@ -244,7 +255,7 @@ impl<D> StreamProducer<D> for ReadStreamProducer {
 }
 
 fn map_dir_entry(
-    entry: std::io::Result<cap_std::fs::DirEntry>,
+    entry: std::io::Result<crate::filesystem::primitives::DirEntry>,
 ) -> Result<Option<DirectoryEntry>, ErrorCode> {
     match entry {
         Ok(entry) => {
@@ -284,13 +295,13 @@ struct ReadDirStream {
 
 impl ReadDirStream {
     fn new(
-        dir: Arc<cap_std::fs::Dir>,
+        dir: Arc<std::fs::File>,
         result: oneshot::Sender<Result<(), ErrorCode>>,
     ) -> ReadDirStream {
         let (tx, rx) = mpsc::channel(1);
         ReadDirStream {
             task: spawn_blocking(move || {
-                let entries = dir.entries()?;
+                let entries = crate::filesystem::primitives::read_base_dir(&dir)?;
                 for entry in entries {
                     if let Some(entry) = map_dir_entry(entry)? {
                         if let Err(_) = tx.blocking_send(entry) {
@@ -428,7 +439,7 @@ impl WriteStreamConsumer {
 }
 
 impl WriteLocation {
-    fn write(&self, file: &cap_std::fs::File, bytes: &[u8]) -> io::Result<usize> {
+    fn write(&self, file: &std::fs::File, bytes: &[u8]) -> io::Result<usize> {
         match *self {
             WriteLocation::End => sys::append_cursor_unspecified(file, bytes),
             WriteLocation::Offset(at) => sys::write_at_cursor_unspecified(file, bytes, at),
@@ -464,7 +475,9 @@ impl<D> StreamConsumer<D> for WriteStreamConsumer {
         let me = &mut *self;
         let task = me.task.get_or_insert_with(|| {
             debug_assert!(me.buffer.is_empty());
-            me.buffer.extend_from_slice(src.remaining());
+            let remaining = src.remaining();
+            let n = remaining.len().min(DEFAULT_BUFFER_CAPACITY);
+            me.buffer.extend_from_slice(&remaining[..n]);
             let buf = mem::take(&mut me.buffer);
             let file = Arc::clone(me.file.as_file());
             let location = me.location;
@@ -522,17 +535,17 @@ impl<U> types::HostDescriptorWithStore<U> for WasiFilesystem {
         fd: Resource<Descriptor>,
         offset: Filesize,
     ) -> wasmtime::Result<(StreamReader<u8>, FutureReader<Result<(), ErrorCode>>)> {
-        let file = get_file(store.get().table, &fd)?;
-        if !file.perms.contains(FilePerms::READ) {
-            return Ok((
-                StreamReader::new(&mut store, iter::empty())?,
-                FutureReader::new(&mut store, async {
-                    wasmtime::error::Ok(Err(ErrorCode::NotPermitted))
-                })?,
-            ));
-        }
-
-        let file = file.clone();
+        let file = match get_descriptor(store.get().table, &fd)? {
+            Descriptor::File(file) => file.clone(),
+            Descriptor::Dir(_) => {
+                return Ok((
+                    StreamReader::new(&mut store, iter::empty())?,
+                    FutureReader::new(&mut store, async move {
+                        wasmtime::error::Ok(Err(ErrorCode::IsDirectory))
+                    })?,
+                ));
+            }
+        };
         let (result_tx, result_rx) = oneshot::channel();
         Ok((
             StreamReader::new(
@@ -556,7 +569,7 @@ impl<U> types::HostDescriptorWithStore<U> for WasiFilesystem {
     ) -> wasmtime::Result<FutureReader<Result<(), ErrorCode>>> {
         let (result_tx, result_rx) = oneshot::channel();
         match get_file(store.get().table, &fd).and_then(|file| {
-            if !file.perms.contains(FilePerms::WRITE) {
+            if file.perms.write_not_permitted() {
                 Err(ErrorCode::NotPermitted.into())
             } else {
                 Ok(file.clone())
@@ -583,7 +596,7 @@ impl<U> types::HostDescriptorWithStore<U> for WasiFilesystem {
     ) -> wasmtime::Result<FutureReader<Result<(), ErrorCode>>> {
         let (result_tx, result_rx) = oneshot::channel();
         match get_file(store.get().table, &fd).and_then(|file| {
-            if !file.perms.contains(FilePerms::WRITE) {
+            if file.perms.write_not_permitted() {
                 Err(ErrorCode::NotPermitted.into())
             } else {
                 Ok(file.clone())
@@ -670,18 +683,12 @@ impl<U> types::HostDescriptorWithStore<U> for WasiFilesystem {
         FutureReader<Result<(), ErrorCode>>,
     )> {
         let (result_tx, result_rx) = oneshot::channel();
-        let stream = match get_dir(store.get().table, &fd).and_then(|dir| {
-            if !dir.perms.contains(DirPerms::READ) {
-                Err(ErrorCode::NotPermitted.into())
-            } else {
-                Ok(dir)
-            }
-        }) {
+        let stream = match get_dir(store.get().table, &fd) {
             Ok(dir) => {
                 let allow_blocking_current_thread = dir.allow_blocking_current_thread;
                 let dir = Arc::clone(dir.as_dir());
                 if allow_blocking_current_thread {
-                    match dir.entries() {
+                    match crate::filesystem::primitives::read_base_dir(&dir) {
                         Ok(readdir) => StreamReader::new(
                             &mut store,
                             FallibleIteratorProducer::new(

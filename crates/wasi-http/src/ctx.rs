@@ -6,6 +6,7 @@ use crate::{DEFAULT_FORBIDDEN_HEADERS, Error, RequestOptions, Result};
 use bytes::Bytes;
 use http::{HeaderName, uri::Scheme};
 use http_body_util::combinators::UnsyncBoxBody;
+use std::sync::Arc;
 use wasmtime::component::{HasData, ResourceTable};
 
 /// A helper struct which implements [`HasData`] for the `wasi:http` APIs.
@@ -154,6 +155,11 @@ impl Default for WasiHttpCtx {
 /// Convenience type definition for the bodies used in this crate.
 pub type WasiBody = UnsyncBoxBody<Bytes, Error>;
 
+/// A cloneable predicate deciding whether a header name is forbidden. This
+/// predicate needs to be executed in tasks which do not have access to the
+/// store.
+pub type ForbiddenHeaderFilter = Arc<dyn Fn(&HeaderName) -> bool + Send + Sync>;
+
 /// A trait which provides hooks into internal WASI HTTP operations.
 ///
 /// Note that when using this type if state is needed to implement the methods
@@ -205,7 +211,15 @@ pub type WasiBody = UnsyncBoxBody<Bytes, Error>;
 pub trait WasiHttpHooks: Send {
     /// Whether a given header should be considered forbidden and not allowed.
     fn is_forbidden_header(&mut self, name: &HeaderName) -> bool {
-        DEFAULT_FORBIDDEN_HEADERS.contains(name)
+        (self.forbidden_header_filter())(name)
+    }
+
+    /// `Self::is_forbidden_header`, but as an Arc closure. This method exists
+    /// as an alternative to is_forbidden_header in order to patch
+    /// GHSA-jxcf-8qw5-5c33, backported to an existing release as a non-breaking
+    /// change
+    fn forbidden_header_filter(&mut self) -> ForbiddenHeaderFilter {
+        Arc::new(|name| DEFAULT_FORBIDDEN_HEADERS.contains(name))
     }
 
     /// Whether a given scheme should be considered supported.
@@ -345,6 +359,13 @@ pub trait WasiHttpHooks: Send {
             rcode: Some("invalid dns name".to_string()),
             info_code: None,
         })
+    }
+
+    /// Maximum number of bytes the implementation will copy out of the guest in
+    /// a single write to an outgoing body's stream.
+    #[cfg(feature = "p3")]
+    fn p3_outgoing_body_chunk_size(&mut self) -> usize {
+        crate::p3::DEFAULT_OUTGOING_BODY_CHUNK_SIZE
     }
 
     /// Optional hook to configure the error code for hyper errors.

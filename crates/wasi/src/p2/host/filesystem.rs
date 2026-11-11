@@ -7,7 +7,6 @@ use crate::p2::bindings::filesystem::types::{
 };
 use crate::p2::filesystem::{FileInputStream, FileOutputStream, ReaddirIterator};
 use crate::p2::{FsError, FsResult};
-use crate::{DirPerms, FilePerms};
 use std::time::SystemTime;
 use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
@@ -108,9 +107,6 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         offset: types::Filesize,
     ) -> FsResult<(Vec<u8>, bool)> {
         let f = self.table.get(&fd)?.file()?;
-        if !f.perms.contains(FilePerms::READ) {
-            return Err(ErrorCode::NotPermitted.into());
-        }
 
         let (mut buffer, r) = f
             .run_blocking(move |f| {
@@ -142,7 +138,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         offset: types::Filesize,
     ) -> FsResult<types::Filesize> {
         let f = self.table.get(&fd)?.file()?;
-        if !f.perms.contains(FilePerms::WRITE) {
+        if f.perms.write_not_permitted() {
             return Err(ErrorCode::NotPermitted.into());
         }
 
@@ -158,9 +154,6 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
     ) -> FsResult<Resource<types::DirectoryEntryStream>> {
         let d = self.table.get(&fd)?.dir()?;
-        if !d.perms.contains(DirPerms::READ) {
-            return Err(ErrorCode::NotPermitted.into());
-        }
 
         enum ReaddirError {
             Io(std::io::Error),
@@ -178,7 +171,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
                 // within this `block` call, rather than delay calculating the metadata
                 // for entries when they're demanded later in the iterator chain.
                 Ok::<_, std::io::Error>(
-                    d.entries()?
+                    crate::filesystem::primitives::read_base_dir(d)?
                         .map(|entry| {
                             let entry = entry?;
                             let meta = entry.metadata()?;
@@ -374,12 +367,12 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         offset: types::Filesize,
     ) -> FsResult<Resource<DynInputStream>> {
-        // Trap if fd lookup fails:
-        let f = self.table.get(&fd)?.file()?;
-
-        if !f.perms.contains(FilePerms::READ) {
-            Err(types::ErrorCode::NotPermitted)?;
-        }
+        // Trap if fd lookup fails. A directory is is-directory, not
+        // bad-descriptor (POSIX EISDIR on read).
+        let f = match self.table.get(&fd)? {
+            Descriptor::File(f) => f,
+            Descriptor::Dir(_) => return Err(ErrorCode::IsDirectory.into()),
+        };
 
         // Create a stream view for it.
         let reader: DynInputStream = Box::new(FileInputStream::new(f, offset));
@@ -398,7 +391,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         // Trap if fd lookup fails:
         let f = self.table.get(&fd)?.file()?;
 
-        if !f.perms.contains(FilePerms::WRITE) {
+        if f.perms.write_not_permitted() {
             Err(types::ErrorCode::NotPermitted)?;
         }
 
@@ -419,7 +412,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         // Trap if fd lookup fails:
         let f = self.table.get(&fd)?.file()?;
 
-        if !f.perms.contains(FilePerms::WRITE) {
+        if f.perms.write_not_permitted() {
             Err(types::ErrorCode::NotPermitted)?;
         }
 
@@ -590,15 +583,17 @@ impl TryFrom<crate::filesystem::DescriptorStat> for types::DescriptorStat {
             status_change_timestamp,
         }: crate::filesystem::DescriptorStat,
     ) -> Result<Self, ErrorCode> {
+        // Internal timestamps use i64 seconds; wasi:clocks/wall-clock uses u64
+        // (non-negative). Times outside that range become missing rather than
+        // failing the whole stat (e.g. host-clamped far-past mtimes on macOS).
         Ok(Self {
             type_: type_.into(),
             link_count,
             size,
-            data_access_timestamp: data_access_timestamp.map(|t| t.try_into()).transpose()?,
+            data_access_timestamp: data_access_timestamp.and_then(|t| t.try_into().ok()),
             data_modification_timestamp: data_modification_timestamp
-                .map(|t| t.try_into())
-                .transpose()?,
-            status_change_timestamp: status_change_timestamp.map(|t| t.try_into()).transpose()?,
+                .and_then(|t| t.try_into().ok()),
+            status_change_timestamp: status_change_timestamp.and_then(|t| t.try_into().ok()),
         })
     }
 }
@@ -718,27 +713,21 @@ impl From<std::num::TryFromIntError> for ErrorCode {
     }
 }
 
-fn descriptortype_from(ft: cap_std::fs::FileType) -> types::DescriptorType {
-    use cap_fs_ext::FileTypeExt;
-    use types::DescriptorType;
-    if ft.is_dir() {
-        DescriptorType::Directory
-    } else if ft.is_symlink() {
-        DescriptorType::SymbolicLink
-    } else if ft.is_block_device() {
-        DescriptorType::BlockDevice
-    } else if ft.is_char_device() {
-        DescriptorType::CharacterDevice
-    } else if ft.is_file() {
-        DescriptorType::RegularFile
-    } else {
-        DescriptorType::Unknown
-    }
+fn descriptortype_from(ft: crate::filesystem::primitives::FileType) -> types::DescriptorType {
+    crate::filesystem::DescriptorType::from(ft).into()
 }
 
 fn systemtime_from(t: wall_clock::Datetime) -> Result<std::time::SystemTime, ErrorCode> {
+    // Catch nanoseconds-into-seconds Overflow error explicitly:
+    // unfortunately, Duration::new panics when input overflows
+    let duration = core::time::Duration::new(
+        t.seconds
+            .checked_add(u64::from(t.nanoseconds / 1_000_000_000))
+            .ok_or(ErrorCode::Overflow)?,
+        t.nanoseconds % 1_000_000_000,
+    );
     std::time::SystemTime::UNIX_EPOCH
-        .checked_add(core::time::Duration::new(t.seconds, t.nanoseconds))
+        .checked_add(duration)
         .ok_or(ErrorCode::Overflow)
 }
 

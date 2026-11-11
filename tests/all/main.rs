@@ -4,11 +4,13 @@ use wasmtime::Result;
 
 mod arrays;
 mod async_functions;
+mod br_table;
 mod call_hook;
 mod cli_tests;
 mod compile_time_builtins;
 mod component_model;
 mod coredump;
+mod cross_engine;
 mod custom_code_memory;
 mod debug;
 mod debug_component;
@@ -52,6 +54,12 @@ mod relocs;
 mod stack_creator;
 mod stack_limit_interruption;
 mod stack_overflow;
+#[cfg(all(
+    feature = "stack-switching",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+mod stack_switching;
 mod store;
 mod structs;
 mod table;
@@ -126,14 +134,18 @@ pub(crate) fn small_pool_config() -> wasmtime::PoolingAllocationConfig {
 }
 
 pub(crate) fn gc_store() -> Result<wasmtime::Store<()>> {
+    Ok(wasmtime::Store::new(&gc_engine()?, ()))
+}
+
+/// A helper to create an engine with GC enabled.
+pub(crate) fn gc_engine() -> Result<wasmtime::Engine> {
     let _ = env_logger::try_init();
 
     let mut config = wasmtime::Config::new();
     config.wasm_function_references(true);
     config.wasm_gc(true);
 
-    let engine = wasmtime::Engine::new(&config)?;
-    Ok(wasmtime::Store::new(&engine, ()))
+    wasmtime::Engine::new(&config)
 }
 
 trait ErrorExt {

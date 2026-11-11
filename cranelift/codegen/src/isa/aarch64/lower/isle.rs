@@ -33,7 +33,6 @@ use crate::{
 };
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::u32;
 use regalloc2::PReg;
 
 type BoxCallInfo = Box<CallInfo<ExternalName>>;
@@ -187,6 +186,14 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
         }
     }
 
+    fn use_i8mm(&mut self, _: Inst) -> Option<()> {
+        if self.backend.isa_flags.has_i8mm() {
+            Some(())
+        } else {
+            None
+        }
+    }
+
     fn use_fp16(&mut self) -> bool {
         self.backend.isa_flags.has_fp16()
     }
@@ -251,7 +258,7 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
     fn lshl_from_u64(&mut self, ty: Type, n: u64) -> Option<ShiftOpAndAmt> {
         let shiftimm = ShiftOpShiftImm::maybe_from_shift(n)?;
         let shiftee_bits = ty_bits(ty);
-        if shiftee_bits <= core::u8::MAX as usize {
+        if shiftee_bits <= u8::MAX as usize {
             let shiftimm = shiftimm.mask(shiftee_bits as u8);
             Some(ShiftOpAndAmt::new(ShiftOp::LSL, shiftimm))
         } else {
@@ -262,7 +269,7 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
     fn ashr_from_u64(&mut self, ty: Type, n: u64) -> Option<ShiftOpAndAmt> {
         let shiftimm = ShiftOpShiftImm::maybe_from_shift(n)?;
         let shiftee_bits = ty_bits(ty);
-        if shiftee_bits <= core::u8::MAX as usize {
+        if shiftee_bits <= u8::MAX as usize {
             let shiftimm = shiftimm.mask(shiftee_bits as u8);
             Some(ShiftOpAndAmt::new(ShiftOp::ASR, shiftimm))
         } else {
@@ -620,8 +627,8 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
     fn targets_jt_space(&mut self, elements: &BoxVecMachLabel) -> CodeOffset {
         // calculate the number of bytes needed for the jumptable sequence:
         // 4 bytes per instruction, with 8 instructions base + the size of
-        // the jumptable more.
-        (4 * (8 + elements.len())).try_into().unwrap()
+        // the jumptable more (including the default entry).
+        (4 * (8 + elements.len() + 1)).try_into().unwrap()
     }
 
     fn min_fp_value(&mut self, signed: bool, in_bits: u8, out_bits: u8) -> Reg {
@@ -824,6 +831,15 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
     }
 
     fn uimm12_scaled_from_i64(&mut self, val: i64, ty: Type) -> Option<UImm12Scaled> {
+        UImm12Scaled::maybe_from_i64(val, ty)
+    }
+
+    /// Like `uimm12_scaled_from_i64`, but rejects a zero value so `base + index
+    /// + 0` keeps its single-instruction `RegExtended` amode.
+    fn uimm12_scaled_nonzero_from_i64(&mut self, val: i64, ty: Type) -> Option<UImm12Scaled> {
+        if val == 0 {
+            return None;
+        }
         UImm12Scaled::maybe_from_i64(val, ty)
     }
 

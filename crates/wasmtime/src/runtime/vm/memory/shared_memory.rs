@@ -155,6 +155,9 @@ impl SharedMemory {
         assert!(mem::size_of::<AtomicU32>() == 4);
         assert!(mem::align_of::<AtomicU32>() <= 4);
         let atomic = unsafe { AtomicU32::from_ptr(addr.cast()) };
+        // Wasm linear memory is always little-endian, but `AtomicU32` uses the
+        // host's native endianness.
+        let expected = expected.to_le();
 
         // When `timeout` is too large to represent as a deadline there is no
         // timeout at all. That effectively maps to the requested timeout since
@@ -181,6 +184,9 @@ impl SharedMemory {
         assert!(mem::size_of::<AtomicU64>() == 8);
         assert!(mem::align_of::<AtomicU64>() <= 8);
         let atomic = unsafe { AtomicU64::from_ptr(addr.cast()) };
+        // Wasm linear memory is always little-endian, but `AtomicU64` uses the
+        // host's native endianness.
+        let expected = expected.to_le();
 
         // See `atomic_wait32` for the unrepresentable-deadline case.
         let deadline = timeout.and_then(parking_spot::deadline_after);

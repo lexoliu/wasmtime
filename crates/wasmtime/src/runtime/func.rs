@@ -16,7 +16,7 @@ use core::convert::Infallible;
 use core::ffi::c_void;
 #[cfg(feature = "async")]
 use core::future::Future;
-use core::mem::MaybeUninit;
+use core::mem::{self, MaybeUninit};
 use core::ptr::NonNull;
 use wasmtime_environ::{PanicOnOom as _, VMSharedTypeIndex};
 
@@ -717,7 +717,7 @@ impl Func {
     /// let instance = Instance::new(&mut store, &module, &[add.into()])?;
     /// let foo = instance.get_typed_func::<(i32, i32), i32>(&mut store, "foo")?;
     /// assert_eq!(foo.call(&mut store, (1, 2))?, 3);
-    /// assert!(foo.call(&mut store, (i32::max_value(), 1)).is_err());
+    /// assert!(foo.call(&mut store, (i32::MAX, 1)).is_err());
     /// # Ok(())
     /// # }
     /// ```
@@ -943,6 +943,7 @@ impl Func {
     ///   via [`Func::new`], for example.
     /// * The `store` provided is configured to require `call_async` to be used
     ///   instead, such as with epochs or fuel.
+    /// * The call is recursive from within e.g. a `call_async` invocation.
     ///
     /// Errors typically indicate that execution of WebAssembly was halted
     /// mid-way and did not complete after the error condition happened.
@@ -1004,6 +1005,7 @@ impl Func {
     ///   types and such.
     /// * Reference types like `externref` and `funcref` are valid at the
     ///   time of this call and for the `store` specified.
+    /// * The call is _not_ recursive from within e.g. a `call_async` invocation.
     ///
     /// These invariants are all upheld for you with [`Func::call`] and
     /// [`TypedFunc::call`].
@@ -1405,7 +1407,7 @@ impl Func {
     /// # use wasmtime::*;
     /// # fn foo(add_with_overflow: &Func, mut store: Store<()>) -> Result<()> {
     /// let typed = add_with_overflow.typed::<(u32, u32), (u32, i32)>(&store)?;
-    /// let (result, overflow) = typed.call(&mut store, (u32::max_value(), 2))?;
+    /// let (result, overflow) = typed.call(&mut store, (u32::MAX, 2))?;
     /// assert_eq!(result, 1);
     /// assert_eq!(overflow, 1);
     /// # Ok(())
@@ -1587,7 +1589,8 @@ impl EntryStoreContext {
         unsafe {
             let vm_store_context = store.0.vm_store_context();
             let new_stack_chain = VMStackChain::InitialStack(initial_stack_information);
-            *vm_store_context.stack_chain.get() = new_stack_chain;
+            let stack_chain =
+                mem::replace(&mut *vm_store_context.stack_chain.get(), new_stack_chain);
 
             Self {
                 stack_limit,
@@ -1600,7 +1603,7 @@ impl EntryStoreContext {
                 last_wasm_entry_trap_handler: *(*vm_store_context)
                     .last_wasm_entry_trap_handler
                     .get(),
-                stack_chain: (*(*vm_store_context).stack_chain.get()).clone(),
+                stack_chain,
                 vm_store_context,
             }
         }
@@ -2373,10 +2376,6 @@ impl HostFunc {
             // this up.
             let mut store = unsafe { store.unchecked_context_mut() };
 
-            // Handle the entry call hook, with a corresponding exit call hook
-            // below.
-            store.0.call_hook(CallHook::CallingHost)?;
-
             // SAFETY: this function itself requires that the `vmctx` is
             // valid to use here.
             let state = unsafe {
@@ -2413,10 +2412,6 @@ impl HostFunc {
             };
 
             store.0.exit_gc_lifo_scope(gc_lifo_scope);
-
-            // Note that if this returns a trap then `ret` is discarded
-            // entirely.
-            store.0.call_hook(CallHook::ReturningFromHost)?;
 
             ret
         };
@@ -2776,6 +2771,10 @@ impl HostFunc {
             Engine::same(&self.engine, store.engine()),
             "cannot use a store with a different engine than a linker was created with",
         );
+    }
+
+    pub(crate) fn engine(&self) -> &Engine {
+        &self.engine
     }
 
     pub(crate) fn sig_index(&self) -> VMSharedTypeIndex {

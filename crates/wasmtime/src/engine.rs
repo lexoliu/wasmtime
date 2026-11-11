@@ -578,6 +578,7 @@ information about this check\
             "has_pauth" => "paca",
             "has_fp16" => "fp16",
             "has_dotprod" => "dotprod",
+            "has_i8mm" => "i8mm",
 
             // aarch64 features which don't need detection
             // No effect on its own.
@@ -608,6 +609,7 @@ information about this check\
             "has_avx" => "avx",
             "has_avx2" => "avx2",
             "has_fma" => "fma",
+            "has_avx_vnni" => "avxvnni",
             "has_bmi1" => "bmi1",
             "has_bmi2" => "bmi2",
             "has_avx512bitalg" => "avx512bitalg",
@@ -615,6 +617,7 @@ information about this check\
             "has_avx512f" => "avx512f",
             "has_avx512vl" => "avx512vl",
             "has_avx512vbmi" => "avx512vbmi",
+            "has_avx512vnni" => "avx512vnni",
             "has_lzcnt" => "lzcnt",
 
             // pulley features

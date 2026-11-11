@@ -458,7 +458,7 @@ impl StoreInterruptHandle {
     /// Requests that the store's guest be interrupted.
     ///
     /// The guest observes the request at its next entry into a function
-    /// that calls wasm, loop header or bulk-memory chunk, and runs the store's
+    /// that calls wasm, loop header or bulk-memory operation, and runs the store's
     /// [`Store::interrupt_callback`] there. A request made while the store
     /// runs host code, or while its guest is suspended on a fiber, is
     /// delivered when the guest next runs one of those checks. Requests made
@@ -1106,6 +1106,10 @@ impl<T> Store<T> {
     /// The `interval` parameter indicates how much fuel should be
     /// consumed between yields of an async future. When fuel runs out wasm will trap.
     ///
+    /// For limitations related to consumption of fuel and when yield points are
+    /// injected, see the discussion in
+    /// [`Config::epoch_interruption`](crate::Config::epoch_interruption).
+    ///
     /// # Error
     ///
     /// This method will error if fuel is not enabled or `interval` is
@@ -1322,6 +1326,11 @@ impl<T> Store<T> {
     /// instantiated. This is useful for guest-debug workflows where
     /// the debugger needs to see modules to set breakpoints before
     /// the first Wasm instruction executes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `module` was not compiled by this store's
+    /// [`Engine`].
     #[cfg(feature = "debug")]
     pub fn debug_register_module(&mut self, module: &crate::Module) -> crate::Result<()> {
         let (modules, engine, breakpoints) = self.inner.modules_and_engine_and_breakpoints_mut();
@@ -1332,11 +1341,18 @@ impl<T> Store<T> {
     /// Register all inner modules of a [`Component`](crate::component::Component)
     /// with this store's module registry for debugging, without instantiating
     /// the component.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `component` was not compiled by this store's
+    /// [`Engine`].
     #[cfg(all(feature = "debug", feature = "component-model"))]
     pub fn debug_register_component(
         &mut self,
         component: &crate::component::Component,
     ) -> crate::Result<()> {
+        let (modules, engine, breakpoints) = self.inner.modules_and_engine_and_breakpoints_mut();
+        modules.register_component(component, engine, breakpoints)?;
         for module in component.static_modules() {
             self.debug_register_module(module)?;
         }
@@ -1647,10 +1663,10 @@ impl StoreOpaque {
     }
 
     #[cfg(feature = "debug")]
-    pub(crate) fn breakpoints_and_registry_mut(
+    pub(crate) fn breakpoints_and_registry_and_engine_mut(
         &mut self,
-    ) -> (&mut BreakpointState, &mut ModuleRegistry) {
-        (&mut self.breakpoints, &mut self.modules)
+    ) -> (&mut BreakpointState, &mut ModuleRegistry, &Engine) {
+        (&mut self.breakpoints, &mut self.modules, &self.engine)
     }
 
     #[cfg(feature = "debug")]
@@ -2126,8 +2142,8 @@ impl StoreOpaque {
             return fault;
         }
 
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "std")] {
+        cfg_select! {
+            feature = "std" => {
                 // With the standard library a rich error can be printed here
                 // to stderr and the native abort path is used.
                 eprintln!(
@@ -2151,14 +2167,16 @@ at https://bytecodealliance.org/security.
 "
                 );
                 std::process::abort();
-            } else if #[cfg(panic = "abort")] {
+            }
+            panic = "abort" => {
                 // Without the standard library but with `panic=abort` then
                 // it's safe to panic as that's known to halt execution. For
                 // now avoid the above error message as well since without
                 // `std` it's probably best to be a bit more size-conscious.
                 let _ = pc;
                 panic!("invalid fault");
-            } else {
+            }
+            _ => {
                 // Without `std` and with `panic = "unwind"` there's no
                 // dedicated API to abort the process portably, so manufacture
                 // this with a double-panic.
@@ -2334,10 +2352,19 @@ at https://bytecodealliance.org/security.
     }
 
     #[inline]
-    pub(crate) fn validate_sync_call(&self) -> Result<()> {
+    pub(crate) fn validate_sync_call(&mut self) -> Result<()> {
         #[cfg(feature = "async")]
         if self.async_state.async_required {
             bail!("store configuration requires that `*_async` functions are used instead");
+        }
+        // We disallow `[Typed]Func::call` from a fiber since it can lead to
+        // e.g. GC or epoch interruption which suspends the fiber, potentially
+        // returning control to the embedder and allowing it to poll a top-level
+        // `call_async` future from another thread, effectively and unsoundly
+        // sending `!Send` data across threads.  In addition, allowing such
+        // recursion risks panicking on stack overflow.
+        if self.can_block() {
+            bail!("cannot do blocking `call` from an async context");
         }
         Ok(())
     }
@@ -2417,6 +2444,11 @@ unsafe impl<T> VMStore for StoreInner<T> {
 
     fn store_opaque_mut(&mut self) -> &mut StoreOpaque {
         &mut self.inner
+    }
+
+    #[cfg(feature = "call-hook")]
+    fn call_hook(&mut self, s: CallHook) -> Result<()> {
+        StoreInner::call_hook(self, s)
     }
 
     fn resource_limiter_and_store_opaque(

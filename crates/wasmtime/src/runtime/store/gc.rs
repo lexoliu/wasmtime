@@ -13,7 +13,8 @@ use crate::vm::{
     SendSyncPtr, StoreGcHostAllocTypes, TraceInfo, VMGcRef,
 };
 use crate::{
-    ExnRef, GcHeapOutOfMemory, Result, Rooted, Store, StoreContextMut, ThrownException, bail,
+    Engine, ExnRef, GcHeapOutOfMemory, Result, Rooted, Store, StoreContextMut, ThrownException,
+    bail,
 };
 use core::fmt;
 use core::mem::ManuallyDrop;
@@ -824,8 +825,8 @@ impl StoreOpaque {
                     // either case things should be handled correctly when traversing
                     // further along in the chain, nothing required at this point.
                 }
-                VMStackState::Fresh | VMStackState::Returned => {
-                    // Fresh/Returned continuations have no gc values on their stack.
+                VMStackState::Fresh | VMStackState::Returned | VMStackState::Trapped => {
+                    // Fresh/terminal continuations have no live GC values on their stack.
                 }
             }
         }
@@ -877,7 +878,17 @@ impl StoreOpaque {
     /// type in this store, and we don't have to worry about the type being
     /// reclaimed (since it is possible that none of the Wasm modules in this
     /// store are holding it alive).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ty` was not registered with this store's engine. The types
+    /// here are keyed by their `VMSharedTypeIndex`, which only means anything
+    /// within the engine that assigned it.
     pub(crate) fn insert_gc_host_alloc_type(&mut self, ty: RegisteredType) {
+        assert!(
+            Engine::same(self.engine(), ty.engine()),
+            "type used with wrong engine"
+        );
         let trace_info = ty.layout().map(TraceInfo::new);
         self.gc_data
             .gc_host_alloc_types

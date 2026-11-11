@@ -502,10 +502,11 @@ impl RunCommand {
                 }
                 if e.is::<wasmtime::Trap>() {
                     eprintln!("Error: {e:?}");
-                    cfg_if::cfg_if! {
-                        if #[cfg(unix)] {
+                    cfg_select! {
+                        unix => {
                             std::process::exit(rustix::process::EXIT_SIGNALED_SIGABRT);
-                        } else if #[cfg(windows)] {
+                        }
+                        windows => {
                             // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/abort?view=vs-2019
                             std::process::exit(3);
                         }
@@ -900,9 +901,7 @@ impl RunCommand {
     #[cfg(feature = "debug")]
     pub(crate) async fn invoke_debugger<
         T: Send + 'static,
-        F: for<'a> FnOnce(
-                &'a mut Store<T>,
-            ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
+        F: FnOnce(&mut Store<T>) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>
             + Send
             + 'static,
     >(
@@ -1358,6 +1357,9 @@ impl RunCommand {
         }
         if let Some(fuel) = self.run.common.wasi.hostcall_fuel {
             store.set_hostcall_fuel(fuel);
+        }
+        if let Some(max) = self.run.common.wasi.max_component_handles {
+            store.set_max_component_handles(max);
         }
         store.data_mut().wasip1_ctx = Some(ctx);
         Ok(())

@@ -1,10 +1,339 @@
+## 48.0.8
+
+Fixed 2026-10-29.
+
+### Fixed
+
+* wasi-sockets: UDP `connect` only required the address to be permitted for
+  sending *or* receiving, allowing guests to send datagrams to addresses denied
+  for `UdpSend`.
+  [GHSA-hmmr-87qq-258j](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-hmmr-87qq-258j)
+
+* Cross-engine type confusion with host-created struct-types-with-supertypes
+  has been fixed.
+  [GHSA-qw58-7h65-crq2](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-qw58-7h65-crq2)
+
+* Panic with typed functions with `i31` or `nullref` arguments has been fixed.
+  [GHSA-3982-jqvv-277m](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-3982-jqvv-277m)
+
+* Unchecked memory usage in transferring borrowed resources between components
+  has been fixed.
+  [GHSA-6fr9-xmw9-5352](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-6fr9-xmw9-5352)
+
+* Fixed a possibility of content-length being invalid or not matching body
+  length in wasi-http p2.
+  [GHSA-h4wp-g4x3-7398](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-h4wp-g4x3-7398)
+
+* Compiling a module with more than ~32k data segments with copy-on-write
+  memory initialization disabled no longer panics with `MemFlagsSetOverflow`.
+  [#15050](https://github.com/bytecodealliance/wasmtime/pull/15050)
+
+--------------------------------------------------------------------------------
+
+## 48.0.7
+
+Released 2026-10-19.
+
+### Fixed
+
+* wasi-http: Guests can add conflicting content lengths to messages
+  [GHSA-r8xh-cgf7-392j](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-r8xh-cgf7-392j)
+* wasi-http p3: forwarded trailers aren't checked against `is_forbidden_header` hook
+  [GHSA-jxcf-8qw5-5c33](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-jxcf-8qw5-5c33)
+* wasi-http p3: Guests can set incorrect content-length for spliced response bodies
+  [GHSA-9prg-84vf-g5fc](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-9prg-84vf-g5fc)
+* Cranelift backend on aarch64 can jump to incorrect target on large Wasm `br_table` instruction
+  [GHSA-mghf-wjfp-p5xm](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-mghf-wjfp-p5xm)
+* Update rustls to 0.23.46
+  [#14768](https://github.com/bytecodealliance/wasmtime/pull/14768)
+*  Panic lowering a host-created component model stream into a guest that expects a different payload type.
+  [GHSA-9pvw-hwfg-92h5](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-9pvw-hwfg-92h5)
+
+--------------------------------------------------------------------------------
+
+## 48.0.6
+
+Released 2026-10-14.
+
+### Fixed
+
+* Out-of-bounds zero-length stream writes can panic.
+  [GHSA-93g3-36p8-x2gc](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-93g3-36p8-x2gc)
+
+* Host panic when component `call_async` is cancelled under some conditions.
+  [GHSA-3r89-v5mq-j5xf](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-3r89-v5mq-j5xf)
+
+* Panic on erroneous call-to-host from guest realloc call.
+  [GHSA-7v24-42x9-pxf7](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-7v24-42x9-pxf7)
+
+* Yielding in a component start function can lead to a host panic.
+  [GHSA-5hhx-4wrr-3j9g](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-5hhx-4wrr-3j9g)
+
+* Panic when invoking an async-lifted function via `call`.
+  [GHSA-m6w2-jwq2-cv2c](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-m6w2-jwq2-cv2c)
+
+* Panic when pending calls are run after a trap.
+  [GHSA-hmwq-g22x-qjw5](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-hmwq-g22x-qjw5)
+
+* Stack overflow dropping a long chain of recursive types.
+  [GHSA-wjc8-633q-pwxr](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-wjc8-633q-pwxr)
+
+* Wasmtime may not properly enforce async-entrypoint requirement.
+  [GHSA-vcg5-q8m5-8379](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-vcg5-q8m5-8379)
+
+* Panic viewing component model stream or future as the wrong type.
+  [GHSA-63h4-6cx9-pjfj](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-63h4-6cx9-pjfj)
+
+* Component-model handle tables are capped only per instance and charged to no
+  limit.
+  [GHSA-q554-3cjc-rx7p](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-q554-3cjc-rx7p)
+
+* Exception tags can cause host data structures to be unaligned.
+  [GHSA-p79w-pv2r-29qp](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-p79w-pv2r-29qp)
+
+* Filesystem sandbox escape when renaming symlinks with trailing slashes.
+  [GHSA-m9f7-9w4p-gv38](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-m9f7-9w4p-gv38)
+
+* Guests can send absolute-form HTTP requests to different hosts.
+  [GHSA-5qpp-g3j2-8frx](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-5qpp-g3j2-8frx)
+
+* `wasi-http`: Request with long url before query parameter crashes host.
+  [GHSA-w36r-2hch-9xp9](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-w36r-2hch-9xp9)
+
+--------------------------------------------------------------------------------
+
+## 48.0.5
+
+Released 2026-10-02.
+
+### Fixed
+
+* Fixed an issue where artifacts for 48.0.4 didn't get correctly published from
+  CI and a GitHub release for 48.0.4 wasn't made.
+  [#14494](https://github.com/bytecodealliance/wasmtime/pull/14494)
+
+--------------------------------------------------------------------------------
+
+## 48.0.4
+
+Released 2026-10-02.
+
+### Fixed
+
+* WASI preview 0 implementation of `poll_oneoff` circumvents fuel consumption.
+  [GHSA-j366-h8gg-77pm](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-j366-h8gg-77pm)
+
+* Excessive allocated memory on the host when guests don't have stdio.
+  [GHSA-gqmc-89g8-p25r](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-gqmc-89g8-p25r)
+
+* `fd_readdir` copies uninitialized struct padding into guest memory.
+  [GHSA-96f6-r43r-8c24](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-96f6-r43r-8c24)
+
+* Guest can panic host through filesystem timestamp before the epoch on wasip3.
+  [GHSA-mr2v-56j5-cmfc](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-mr2v-56j5-cmfc)
+
+* Wasmtime component async-lifted callback result count is unvalidated, causing a native stack buffer overflow.
+  [GHSA-32h6-97mm-8q3c](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-32h6-97mm-8q3c)
+
+* Mis-typed WebAssembly tag imports can lead to GC heap corruption.
+  [GHSA-cfhf-m2cr-62wj](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-cfhf-m2cr-62wj)
+
+* Wasmtime wasi:http implementation panics with a zero timeout supplied.
+  [GHSA-w4qr-p94g-mjhv](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-w4qr-p94g-mjhv)
+
+* Rooting for GC values live across `try_call` may be missing, causing GC heap corruption.
+  [GHSA-hw8m-q44c-ggrf](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-hw8m-q44c-ggrf)
+
+--------------------------------------------------------------------------------
+
+## 48.0.3
+
+Released 2026-09-24.
+
+### Fixed
+
+* Do not drop fuel-spend accrued by callees of `call_ref` and callees that
+  return via exception throws.
+  [GHSA-m63x-6p34-q65x](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-m63x-6p34-q65x)
+
+* Fix fuel spend for dynamic record lifting.
+  [GHSA-jqpg-j7w6-42pr](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-jqpg-j7w6-42pr)
+
+* Fix host memory exhaustion on outgoing HTTP body write.
+  [GHSA-c9gc-w9vx-w86p](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-c9gc-w9vx-w86p)
+
+* wasmtime-wasi: Fix panic on out-of-range datetimes in WASI filesystem set-times, set-times-at.
+  [GHSA-j2g9-4prp-pf6h](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-j2g9-4prp-pf6h)
+
+--------------------------------------------------------------------------------
+
+## 48.0.2
+
+Released 2026-09-10.
+
+### Changed
+
+* Wasmtime's dependency on `cap-primitives` is now vendored within Wasmtime
+  itself.
+  [#14225](https://github.com/bytecodealliance/wasmtime/pull/14225)
+
+### Fixed
+
+* Code generated by `bindgen!` is now compatible with the latest Rust nightly by
+  default.
+  [#14307](https://github.com/bytecodealliance/wasmtime/pull/14307)
+
+--------------------------------------------------------------------------------
+
+## 48.0.1
+
+Released 2026-08-24.
+
+### Fixed
+
+* Context slots in component compositions are now correctly managed.
+  [#14139](https://github.com/bytecodealliance/wasmtime/pull/14139)
+
+* The `Host` header is now set by default for HTTP requests sent with WASIp2.
+  [#14167](https://github.com/bytecodealliance/wasmtime/pull/14167)
+
+--------------------------------------------------------------------------------
+
 ## 48.0.0
 
-Unreleased.
+Released 2026-08-20.
 
 ### Added
 
+* Wasmtime has an initial implementation of the component model
+  fixed-length-lists feature.
+  [#12315](https://github.com/bytecodealliance/wasmtime/pull/12315)
+
+* Wasmtime's reflection of component imports/exports now exposes `external-id`
+  information.
+  [#13874](https://github.com/bytecodealliance/wasmtime/pull/13874)
+
+* Cranelift's alias analysis pass now eliminates dead stores.
+  [#13806](https://github.com/bytecodealliance/wasmtime/pull/13806)
+  [#13947](https://github.com/bytecodealliance/wasmtime/pull/13947)
+
+* Winch now supports the wasm SIMD proposal on AArch64.
+  [#13911](https://github.com/bytecodealliance/wasmtime/pull/13911)
+  [#13921](https://github.com/bytecodealliance/wasmtime/pull/13921)
+  [#13928](https://github.com/bytecodealliance/wasmtime/pull/13928)
+  [#13937](https://github.com/bytecodealliance/wasmtime/pull/13937)
+  [#13945](https://github.com/bytecodealliance/wasmtime/pull/13945)
+  [#13938](https://github.com/bytecodealliance/wasmtime/pull/13938)
+  [#13946](https://github.com/bytecodealliance/wasmtime/pull/13946)
+  ...
+
+* Cranelift now supports an AVX512-VNNI lowering for the dot-product wasm
+  instruction and `usdot` on AArch64.
+  [#14006](https://github.com/bytecodealliance/wasmtime/pull/14006)
+  [#14054](https://github.com/bytecodealliance/wasmtime/pull/14054)
+
+* Wasmtime's `bindgen!` macro now has an `include_component_type` option to
+  generate a `COMPONENT_TYPE` constant with the encoded type of the world being
+  bound.
+  [#14013](https://github.com/bytecodealliance/wasmtime/pull/14013)
+
+* Wasmtime now supports configurable fuel costs for variable-length wasm
+  opcodes.
+  [#13931](https://github.com/bytecodealliance/wasmtime/pull/13931)
+
 ### Changed
+
+* Host-implemented traits in `wasmtime-wasi-http` are now the same across
+  wasip2/wasip3 and no longer require separate implementations/structures.
+  [#13810](https://github.com/bytecodealliance/wasmtime/pull/13810)
+  [#13812](https://github.com/bytecodealliance/wasmtime/pull/13812)
+  [#13835](https://github.com/bytecodealliance/wasmtime/pull/13835)
+
+* Wasmtime will now use the `process_madvise` syscall on Linux where available
+  which can improve the performance of the pooling allocator when the
+  deallocation batch size is configured to larger than 1.
+  [#13830](https://github.com/bytecodealliance/wasmtime/pull/13830)
+
+* Synchronous cancellation of streams/futures/subtasks now traps if the waitable
+  was already in a waitable set.
+  [#13708](https://github.com/bytecodealliance/wasmtime/pull/13708)
+
+* Winch is now flagged to be compatible with component-model-async.
+  [#13845](https://github.com/bytecodealliance/wasmtime/pull/13845)
+
+* Wasmtime's pooling allocator now uses more sharding to reduce lock contention.
+  [#13840](https://github.com/bytecodealliance/wasmtime/pull/13840)
+
+* Wasmtime now requires Rust 1.95.0 to build.
+  [#13853](https://github.com/bytecodealliance/wasmtime/pull/13853)
+
+* Cranelift now has a uniform maximum size across all backends on the bounds of
+  a function's stack frame.
+  [#13783](https://github.com/bytecodealliance/wasmtime/pull/13783)
+
+* Wasmtime's `LinkerInstance` for components now supports being reopened to
+  gradually add more items.
+  [#13908](https://github.com/bytecodealliance/wasmtime/pull/13908)
+
+* The `wasmtime-wasi` crate's default configuration now denies creation of
+  TCP/UDP sockets by default.
+  [#13936](https://github.com/bytecodealliance/wasmtime/pull/13936)
+
+* Wasmtime now configures async task context fields on `realloc` calls to zero.
+  [#13949](https://github.com/bytecodealliance/wasmtime/pull/13949)
+
+* Work has continued on continuous verification of Cranelift's lowering rules
+  on AArch64.
+  [#13935](https://github.com/bytecodealliance/wasmtime/pull/13935)
+  [#13929](https://github.com/bytecodealliance/wasmtime/pull/13929)
+  [#13998](https://github.com/bytecodealliance/wasmtime/pull/13998)
+
+* Codegen for loads on AArch64 has been optimized slightly to improve sharing
+  common sub-expressions.
+  [#13766](https://github.com/bytecodealliance/wasmtime/pull/13766)
+
+* Work continues on implementing the stack-switching proposal.
+  [#11717](https://github.com/bytecodealliance/wasmtime/pull/11717)
+  [#13996](https://github.com/bytecodealliance/wasmtime/pull/13996)
+  [#14052](https://github.com/bytecodealliance/wasmtime/pull/14052)
+
+* Permissions for `wasi-filesystem` in the implementation of the `wasmtime-wasi`
+  crate have been simplified to either read-write or read-only for a directory.
+  [#14010](https://github.com/bytecodealliance/wasmtime/pull/14010)
+
+### Fixed
+
+* A late-drop of host-defined stream producers/consumers has been fixed.
+  [#13891](https://github.com/bytecodealliance/wasmtime/pull/13891)
+
+* Call hooks are now invoked around async yields when dealing with concurrent
+  execution.
+  [#13871](https://github.com/bytecodealliance/wasmtime/pull/13871)
+
+* Extreme filesystem timestamps no longer cause panics.
+  [#13894](https://github.com/bytecodealliance/wasmtime/pull/13894)
+
+* An erroneous trap was fixed where an async-delivered write-closed event was
+  sent to a future.
+  [#13914](https://github.com/bytecodealliance/wasmtime/pull/13914)
+
+* An erroneous trap where Wasmtime internally used the wrong thread id has been
+  fixed.
+  [#13926](https://github.com/bytecodealliance/wasmtime/pull/13926)
+
+* Cross-component instance streams are no longer erroneously flagged as being
+  intra-instance.
+  [#14018](https://github.com/bytecodealliance/wasmtime/pull/14018)
+
+* A panic in the `wasmtime` CLI with non-utf8 environment variables has been
+  fixed.
+  [#14017](https://github.com/bytecodealliance/wasmtime/pull/14017)
+
+* Atomic waits on big-endian hosts have been fixed.
+  [#14027](https://github.com/bytecodealliance/wasmtime/pull/14027)
+
+* Enabling MPK with CoW images has been fixed.
+  [#14076](https://github.com/bytecodealliance/wasmtime/pull/14076)
 
 --------------------------------------------------------------------------------
 

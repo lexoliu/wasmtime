@@ -172,14 +172,14 @@ impl<P: PtrSize> VMComponentOffsets<P> {
             size(builtins) = ret.ptr.size(),
             size(vm_store_context) = ret.ptr.size(),
             align(16),
-            size(may_leave) = cmul(ret.num_runtime_component_instances, ret.ptr.size_of_vmglobal_definition()),
-            size(task_may_block) = ret.ptr.size_of_vmglobal_definition(),
+            size(may_leave) = cmul(ret.num_runtime_component_instances, ret.ptr.vm_global_definition().size()),
+            size(task_may_block) = ret.ptr.vm_global_definition().size(),
             align(u32::from(ret.ptr.size())),
-            size(trampoline_func_refs) = cmul(ret.num_trampolines, ret.ptr.size_of_vm_func_ref()),
-            size(intrinsic_func_refs) = cmul(ret.num_unsafe_intrinsics, ret.ptr.size_of_vm_func_ref()),
+            size(trampoline_func_refs) = cmul(ret.num_trampolines, ret.ptr.vm_func_ref().size()),
+            size(intrinsic_func_refs) = cmul(ret.num_unsafe_intrinsics, ret.ptr.vm_func_ref().size()),
             size(lowerings) = cmul(ret.num_lowerings, ret.ptr.size() * 2),
             size(memories) = cmul(ret.num_runtime_memories, ret.ptr.size()),
-            size(tables) = cmul(ret.num_runtime_tables, ret.size_of_vmtable_import()),
+            size(tables) = cmul(ret.num_runtime_tables, ret.ptr.vm_table_import().size()),
             size(reallocs) = cmul(ret.num_runtime_reallocs, ret.ptr.size()),
             size(callbacks) = cmul(ret.num_runtime_callbacks, ret.ptr.size()),
             size(post_returns) = cmul(ret.num_runtime_post_returns, ret.ptr.size()),
@@ -218,7 +218,7 @@ impl<P: PtrSize> VMComponentOffsets<P> {
     #[inline]
     pub fn may_leave(&self, index: RuntimeComponentInstanceIndex) -> u32 {
         assert!(index.as_u32() < self.num_runtime_component_instances);
-        self.may_leave + index.as_u32() * u32::from(self.ptr.size_of_vmglobal_definition())
+        self.may_leave + index.as_u32() * u32::from(self.ptr.vm_global_definition().size())
     }
 
     /// The offset of the `task_may_block` field.
@@ -242,7 +242,7 @@ impl<P: PtrSize> VMComponentOffsets<P> {
     #[inline]
     pub fn trampoline_func_ref(&self, index: TrampolineIndex) -> u32 {
         assert!(index.as_u32() < self.num_trampolines);
-        self.trampoline_func_refs() + index.as_u32() * u32::from(self.ptr.size_of_vm_func_ref())
+        self.trampoline_func_refs() + index.as_u32() * u32::from(self.ptr.vm_func_ref().size())
     }
 
     /// The offset of the `unsafe_intrinsic_func_refs` field.
@@ -256,7 +256,7 @@ impl<P: PtrSize> VMComponentOffsets<P> {
     pub fn unsafe_intrinsic_func_ref(&self, intrinsic: UnsafeIntrinsic) -> u32 {
         assert!(intrinsic.index() < self.num_unsafe_intrinsics);
         self.unsafe_intrinsic_func_refs()
-            + intrinsic.index() * u32::from(self.ptr.size_of_vm_func_ref())
+            + intrinsic.index() * u32::from(self.ptr.vm_func_ref().size())
     }
 
     /// The offset of the `lowerings` field.
@@ -326,14 +326,7 @@ impl<P: PtrSize> VMComponentOffsets<P> {
     #[inline]
     pub fn runtime_table(&self, index: RuntimeTableIndex) -> u32 {
         assert!(index.as_u32() < self.num_runtime_tables);
-        self.runtime_tables() + index.as_u32() * u32::from(self.size_of_vmtable_import())
-    }
-
-    /// Return the size of `VMTableImport`, used here to hold the pointers to
-    /// the `VMTableDefinition` and `VMContext`.
-    #[inline]
-    pub fn size_of_vmtable_import(&self) -> u8 {
-        3 * self.pointer_size()
+        self.runtime_tables() + index.as_u32() * u32::from(self.ptr.vm_table_import().size())
     }
 
     /// The offset of the base of the `runtime_reallocs` field

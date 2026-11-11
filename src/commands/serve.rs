@@ -449,6 +449,9 @@ impl ServeCommand {
         if let Some(fuel) = self.run.common.wasi.hostcall_fuel {
             store.set_hostcall_fuel(fuel);
         }
+        if let Some(max) = self.run.common.wasi.max_component_handles {
+            store.set_max_component_handles(max);
+        }
 
         store.data_mut().limits = self.run.store_limits();
         store.limiter(|t| &mut t.limits);
@@ -734,7 +737,10 @@ impl ServeCommand {
             // task to handle this client.
             match &mut debuggee_store {
                 Some(store) => {
-                    handle_client(stream, &handler, Some(store)).await;
+                    // Boxed to avoid triggering rustc's recursion limit.
+                    let client: Pin<Box<dyn Future<Output = _> + Send + '_>> =
+                        Box::pin(handle_client(stream, &handler, Some(store)));
+                    client.await;
                 }
                 None => {
                     let handler = handler.clone();
@@ -817,7 +823,7 @@ struct HostWorkerState {
 
 impl WorkerState for HostWorkerState {
     type StoreData = Host;
-    type RequestId = u64;
+    type RequestData = u64;
 
     fn should_accept_request(&self, concurrent_count: usize, total_count: usize) -> ShouldAccept {
         if total_count >= self.max_instance_reuse_count {
@@ -1344,7 +1350,7 @@ impl wasmtime_wasi::p2::OutputStream for LogStream {
     }
 
     fn check_write(&mut self) -> StreamResult<usize> {
-        Ok(1024 * 1024)
+        Ok(64 * 1024)
     }
 }
 

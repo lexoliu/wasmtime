@@ -861,6 +861,31 @@ mod named_imports {
         }
     }
 
+    mod hyphenated_interface_name {
+        wasmtime::component::bindgen!({
+            inline: "
+                package foo:foo;
+
+                interface my-itf {
+                    ping: func();
+                }
+
+                world the-world {
+                    import my-itf;
+                }
+            ",
+            named_imports: {
+                "foo:foo/my-itf": String,
+            },
+        });
+
+        struct MyHost;
+
+        impl named_imports::foo::foo::my_itf::Host for MyHost {
+            fn ping(&mut self, _id: String) {}
+        }
+    }
+
     mod async_store {
         #[derive(Clone)]
         pub struct MyId(u32);
@@ -1002,5 +1027,32 @@ mod named_imports {
             },
             imports: { default: async | store },
         });
+    }
+}
+
+mod include_component_type {
+    wasmtime::component::bindgen!({
+        inline: "
+            package demo:pkg;
+
+            interface host {
+                greet: func(name: string) -> string;
+            }
+
+            world component-type-world {
+                import host;
+                export run: func() -> u32;
+            }
+        ",
+        include_component_type: true,
+    });
+
+    #[test]
+    fn component_type_decodes() {
+        let (resolve, world) = wit_parser::decoding::decode_world(COMPONENT_TYPE).unwrap();
+        let world = &resolve.worlds[world];
+        assert_eq!(world.name, "component-type-world");
+        assert_eq!(world.imports.len(), 1);
+        assert_eq!(world.exports.len(), 1);
     }
 }

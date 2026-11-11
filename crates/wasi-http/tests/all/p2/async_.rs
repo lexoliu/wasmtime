@@ -26,7 +26,7 @@ async fn p2_http_outbound_request_get() -> Result<()> {
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn p2_http_outbound_request_timeout() -> Result<()> {
-    let server = Server::http1(1)?;
+    let server = Server::http1(3)?;
     run(P2_HTTP_OUTBOUND_REQUEST_TIMEOUT_COMPONENT, &server).await
 }
 
@@ -40,6 +40,12 @@ async fn p2_http_outbound_request_post() -> Result<()> {
 async fn p2_http_outbound_request_large_post() -> Result<()> {
     let server = Server::http1(1)?;
     run(P2_HTTP_OUTBOUND_REQUEST_LARGE_POST_COMPONENT, &server).await
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p2_http_outbound_request_long_path() -> Result<()> {
+    let server = Server::http1(1)?;
+    run(P2_HTTP_OUTBOUND_REQUEST_LONG_PATH_COMPONENT, &server).await
 }
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
@@ -101,6 +107,18 @@ async fn p2_http_outbound_request_content_length() -> Result<()> {
 }
 
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p2_http_outbound_request_forward_duplicate_content_length() -> Result<()> {
+    crate::shared::forward_duplicate_content_length(async |server| {
+        run(
+            P2_HTTP_OUTBOUND_REQUEST_FORWARD_DUPLICATE_CONTENT_LENGTH_COMPONENT,
+            server,
+        )
+        .await
+    })
+    .await
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn p2_http_outbound_request_missing_path_and_query() -> Result<()> {
     let server = Server::http1(1)?;
     run(
@@ -108,4 +126,19 @@ async fn p2_http_outbound_request_missing_path_and_query() -> Result<()> {
         &server,
     )
     .await
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p2_http_outbound_body_write_backpressure() -> Result<()> {
+    let server = Server::http1(0)?;
+    let e = run(P2_HTTP_OUTBOUND_BODY_WRITE_BACKPRESSURE_COMPONENT, &server)
+        .await
+        .err()
+        .expect("guest execution should trap");
+    let e_debug = format!("{e:?}");
+    assert!(
+        e_debug.contains("write exceeded budget"),
+        "expected trap to contain 'write exceeded budget': {e:?}"
+    );
+    Ok(())
 }

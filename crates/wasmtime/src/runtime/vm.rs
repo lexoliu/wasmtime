@@ -163,12 +163,13 @@ mod send_sync_unsafe_cell;
 #[allow(unused, reason = "hard to cfg on/off, weird feature interactions")]
 pub use send_sync_unsafe_cell::SendSyncUnsafeCell;
 
-cfg_if::cfg_if! {
-    if #[cfg(has_virtual_memory)] {
+cfg_select! {
+    has_virtual_memory => {
         pub use crate::runtime::vm::byte_count::*;
         pub use crate::runtime::vm::mmap::{Mmap, MmapOffset};
         pub use self::cow::{MemoryImage, MemoryImageSlot, ModuleMemoryImages};
-    } else {
+    }
+    _ => {
         pub use self::cow_disabled::{MemoryImage, MemoryImageSlot, ModuleMemoryImages};
     }
 }
@@ -216,6 +217,11 @@ pub unsafe trait VMStore: 'static {
     fn resource_limiter_and_store_opaque(
         &mut self,
     ) -> (Option<StoreResourceLimiter<'_>>, &mut StoreOpaque);
+
+    /// Invoke this store's configured call hook, if any, to notify the
+    /// embedder of a transition between the host and WebAssembly.
+    #[cfg(feature = "call-hook")]
+    fn call_hook(&mut self, s: crate::CallHook) -> Result<()>;
 
     /// Callback invoked whenever an instance observes a new epoch
     /// number. Cannot fail; cooperative epoch-based yielding is
@@ -299,26 +305,48 @@ pub enum ModuleRuntimeInfo {
 /// cases where a purpose-built environ::Module is used and a full
 /// CompiledModule does not exist (for example, for tests or for the
 /// default-callee instance).
-#[derive(Clone)]
 pub struct BareModuleInfo {
     module: Arc<wasmtime_environ::Module>,
     offsets: VMOffsets<HostPtr>,
-    _registered_type: Option<RegisteredType>,
+    _registered_types: TryVec<RegisteredType>,
 }
 
 impl ModuleRuntimeInfo {
     pub(crate) fn bare(module: Arc<wasmtime_environ::Module>) -> Result<Self, OutOfMemory> {
-        ModuleRuntimeInfo::bare_with_registered_type(module, None)
+        ModuleRuntimeInfo::new_bare(module, TryVec::new())
     }
 
-    pub(crate) fn bare_with_registered_type(
+    /// Same as [`ModuleRuntimeInfo::bare`], but additionally keeps
+    /// `registered_types` alive for as long as the resulting instance.
+    ///
+    /// This is the choke point at which a host-allocated table or tag holds
+    /// `VMSharedTypeIndex`es alive on behalf of a store, so it is where we
+    /// check that those types belong to that store's engine. Returns an error
+    /// if any of `registered_types` was not registered with `engine`.
+    pub(crate) fn bare_with_registered_types(
         module: Arc<wasmtime_environ::Module>,
-        registered_type: Option<RegisteredType>,
+        engine: &crate::Engine,
+        registered_types: impl IntoIterator<Item = RegisteredType>,
+    ) -> Result<Self> {
+        let mut types = TryVec::new();
+        for ty in registered_types {
+            crate::ensure!(
+                crate::Engine::same(engine, ty.engine()),
+                "type used with wrong engine"
+            );
+            types.push(ty)?;
+        }
+        Ok(ModuleRuntimeInfo::new_bare(module, types)?)
+    }
+
+    fn new_bare(
+        module: Arc<wasmtime_environ::Module>,
+        registered_types: TryVec<RegisteredType>,
     ) -> Result<Self, OutOfMemory> {
         let info = try_new(BareModuleInfo {
             offsets: VMOffsets::new(HostPtr, &module),
             module,
-            _registered_type: registered_type,
+            _registered_types: registered_types,
         })?;
         Ok(ModuleRuntimeInfo::Bare(info))
     }

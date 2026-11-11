@@ -787,7 +787,7 @@ fn stack_limit_interrupt(
                     store.yield_now().await;
                 }
             }
-            Ok(())
+            Ok::<(), Error>(())
         })??;
     }
 

@@ -1,6 +1,5 @@
 //! Implementation of the `wasi:http/outgoing-handler` interface.
 
-use crate::WasiHttpCtxView;
 use crate::p2::{
     HttpResult,
     bindings::http::{
@@ -11,6 +10,7 @@ use crate::p2::{
     http_request_error,
     types::{HostFutureIncomingResponse, HostOutgoingRequest},
 };
+use crate::{WasiHttpCtxView, get_content_length};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty};
 use hyper::Method;
@@ -26,6 +26,17 @@ impl outgoing_handler::Host for WasiHttpCtxView<'_> {
         let opts = options.and_then(|opts| self.table.get(&opts).ok()).cloned();
 
         let req = self.table.delete(request_id)?;
+
+        // The `content-length` header is otherwise only validated in
+        // `outgoing-request.body` and `outgoing-body.finish`, neither of which
+        // a guest is required to call. Validate it here too so that malformed
+        // requests never reach the wire.
+        let content_length =
+            get_content_length(&req.headers).map_err(|err| internal_error(format!("{err:#}")))?;
+        if req.body.is_none() && content_length.is_some_and(|n| n != 0) {
+            return Err(types::ErrorCode::HttpRequestBodySize(Some(0)).into());
+        }
+
         let mut builder = hyper::Request::builder();
 
         builder = builder.method(match req.method {
@@ -44,12 +55,25 @@ impl outgoing_handler::Host for WasiHttpCtxView<'_> {
             },
         });
 
-        let scheme = match req.scheme.unwrap_or(Scheme::Https) {
-            Scheme::Http => http::uri::Scheme::HTTP,
-            Scheme::Https => http::uri::Scheme::HTTPS,
-
-            // We can only support http/https
-            Scheme::Other(_) => return Err(types::ErrorCode::HttpProtocolError.into()),
+        let scheme = match req.scheme {
+            Some(scheme) => {
+                let scheme = match scheme {
+                    Scheme::Http => http::uri::Scheme::HTTP,
+                    Scheme::Https => http::uri::Scheme::HTTPS,
+                    Scheme::Other(scheme) => http::uri::Scheme::try_from(scheme.as_str())
+                        .map_err(|_| types::ErrorCode::HttpProtocolError)?,
+                };
+                if !self.hooks.is_supported_scheme(&scheme) {
+                    return Err(types::ErrorCode::HttpProtocolError.into());
+                }
+                scheme
+            }
+            // Note that a hook returning `None` here means that guests are
+            // required to specify a scheme themselves.
+            None => self
+                .hooks
+                .default_scheme()
+                .ok_or(types::ErrorCode::HttpProtocolError)?,
         };
 
         let authority = req.authority.unwrap_or_else(String::new);
@@ -63,6 +87,10 @@ impl outgoing_handler::Host for WasiHttpCtxView<'_> {
         }
 
         builder = builder.uri(uri.build().map_err(http_request_error)?);
+
+        if self.hooks.set_host_header() {
+            builder = builder.header(http::header::HOST, authority.as_str());
+        }
 
         for (k, v) in req.headers.iter() {
             builder = builder.header(k, v);

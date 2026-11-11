@@ -7,7 +7,9 @@ use crate::component::store::ComponentTaskState;
 use crate::component::{Instance, ResourceType, RuntimeInstance};
 use crate::prelude::*;
 use crate::runtime::vm::VMFuncRef;
-use crate::runtime::vm::component::{ComponentInstance, HandleTable, ResourceTables};
+use crate::runtime::vm::component::{
+    ComponentInstance, HandleCounter, HandleTable, ResourceTables,
+};
 use crate::store::{StoreId, StoreOpaque};
 use alloc::sync::Arc;
 use core::fmt;
@@ -146,6 +148,19 @@ impl<'a, T: 'static> LowerContext<'a, T> {
     ) -> Result<usize> {
         assert!(self.allow_realloc);
 
+        // All calls to `realloc` options in the canonical ABI zero out the
+        // `context.{get,set}` slots for the duration of the call. This sort of
+        // fakes a "fresh thread" for each call, but this is the only observable
+        // state so nothing else needs adjusting. Note though that the original
+        // values are preserved still to get restored after this call.
+        #[cfg(feature = "component-model-async")]
+        let orig_context = {
+            let vm_store_context = self.store.0.vm_store_context();
+            let orig_context = vm_store_context.component_context();
+            vm_store_context.set_component_context(Default::default());
+            orig_context
+        };
+
         let (component, store) = self.instance.component_and_store_mut(self.store.0);
         let instance = self.instance.id().get(store);
         let options = &component.env_component().options[self.options];
@@ -155,6 +170,7 @@ impl<'a, T: 'static> LowerContext<'a, T> {
             CanonicalOptionsDataModel::LinearMemory(m) => m.realloc.unwrap(),
         };
         let realloc = instance.runtime_realloc(realloc);
+        let mut flags = instance.instance_flags(options.instance);
 
         let params = (
             u32::try_from(old)?,
@@ -167,8 +183,16 @@ impl<'a, T: 'static> LowerContext<'a, T> {
 
         // Invoke the wasm malloc function using its raw and statically known
         // signature.
+        //
+        // Per the canonical ABI `realloc` always runs with `may_leave` cleared
+        // so it can't call imports or intrinsics.
         let result = unsafe {
-            ReallocFunc::call_raw(&mut StoreContextMut(store), &realloc_ty, realloc, params)?
+            let prev_may_leave = flags.may_leave();
+            flags.set_may_leave(false);
+            let result =
+                ReallocFunc::call_raw(&mut StoreContextMut(store), &realloc_ty, realloc, params);
+            flags.set_may_leave(prev_may_leave);
+            result?
         };
 
         if result % old_align != 0 {
@@ -183,6 +207,17 @@ impl<'a, T: 'static> LowerContext<'a, T> {
             .is_none()
         {
             bail!("realloc return: beyond end of memory")
+        }
+
+        // Note that this restoration isn't part of a `Drop` guard which works
+        // because once a component traps it's locked-down and inaccessible, so
+        // it's ok if this isn't restored.
+        #[cfg(feature = "component-model-async")]
+        {
+            self.store
+                .0
+                .vm_store_context()
+                .set_component_context(orig_context);
         }
 
         Ok(result)
@@ -319,6 +354,7 @@ pub struct LiftContext<'a> {
     instance_handle: Instance,
 
     host_table: &'a mut HandleTable,
+    handle_counter: &'a mut HandleCounter,
     host_resource_data: &'a mut HostResourceData,
 
     task_state: &'a mut ComponentTaskState,
@@ -350,7 +386,7 @@ impl<'a> LiftContext<'a> {
         // at this time.
         let memory =
             instance_handle.options_memory(unsafe { &*(store as *const StoreOpaque) }, options);
-        let (task_state, host_table, host_resource_data, instance) =
+        let (task_state, host_table, handle_counter, host_resource_data, instance) =
             store.lift_context_parts(instance_handle);
         let (component, instance) = instance.component_and_self();
 
@@ -364,6 +400,7 @@ impl<'a> LiftContext<'a> {
             instance_handle,
             task_state,
             host_table,
+            handle_counter,
             host_resource_data,
             hostcall_fuel,
         })
@@ -408,10 +445,15 @@ impl<'a> LiftContext<'a> {
     #[cfg(feature = "component-model-async")]
     pub(crate) fn concurrent_state_and_instance_mut(
         &mut self,
-    ) -> (&mut ConcurrentState, Pin<&mut ComponentInstance>) {
+    ) -> (
+        &mut ConcurrentState,
+        Pin<&mut ComponentInstance>,
+        &mut HandleCounter,
+    ) {
         (
             self.task_state.concurrent_state_mut(),
             self.instance.as_mut(),
+            self.handle_counter,
         )
     }
 
@@ -472,6 +514,7 @@ impl<'a> LiftContext<'a> {
         HostResourceTables::from_parts(
             ResourceTables {
                 host_table: self.host_table,
+                handle_counter: self.handle_counter,
                 task_state: self.task_state,
                 guest: Some(self.instance.as_mut().instance_states()),
                 current_scope_id: self.current_scope_id,

@@ -643,8 +643,6 @@ impl Config {
     ///
     /// By default this option is `false`.
     ///
-    /// **Note** Enabling this option is not compatible with the Winch compiler.
-    ///
     /// [`Store`]: crate::Store
     pub fn consume_fuel(&mut self, enable: bool) -> &mut Self {
         self.tunables.consume_fuel = Some(enable);
@@ -652,6 +650,10 @@ impl Config {
     }
 
     /// Configures the fuel cost of each WebAssembly operator.
+    ///
+    /// In addition to each operator's flat cost, [`OperatorCost::variable`]
+    /// configures per-byte, per-element, and per-page costs for operators whose
+    /// work depends on a runtime operand.
     ///
     /// This is only relevant when [`Config::consume_fuel`] is enabled.
     pub fn operator_cost(&mut self, cost: OperatorCost) -> &mut Self {
@@ -691,10 +693,6 @@ impl Config {
     /// periodic way (say, every regular timer tick by a thread or
     /// signal handler), then we can ensure that all async code will
     /// yield to the executor within a bounded time.
-    ///
-    /// The deadline check cannot be avoided by malicious wasm code. It is safe
-    /// to use epoch deadlines to limit the execution time of untrusted
-    /// code.
     ///
     /// The [`Store`](crate::Store) tracks the deadline, and controls
     /// what happens when the deadline is reached during
@@ -741,6 +739,27 @@ impl Config {
     /// computation and have the desired effect of cancelling a blocking
     /// operation when a timeout expires.
     ///
+    /// ## Limitations with malicious guests
+    ///
+    /// Epochs are designed to handle malicious WebAssembly guests -- the
+    /// deadline check cannot be avoided by WebAssembly code. It is safe to use
+    /// epoch deadlines to limit the execution time of untrusted code.
+    ///
+    /// Note, though, that a current limitation to this is that
+    /// bulk-data-transfer instructions, such as `memory.copy`, only check the
+    /// epoch once at the start of the operation. These operations can take a
+    /// variable amount of time to complete based on how many bytes are being
+    /// copied. This means that the maximal time slice a guest might take is
+    /// the maximum of the epoch interval and the largest
+    /// memory-copy-style-instruction executed. The size of a copy is bounded
+    /// on the size of linear memory or GC heap size. In the limit, however, a
+    /// guest using a 64-bit linear memory with a 128GiB size could issue a
+    /// 128GiB `memory.copy` which would have no preemption within the
+    /// instruction itself. Hosts which need strict time limits for guests right
+    /// now are recommended to ensure that the store's allocated heap size
+    /// (linear memory + GC heap) are bounded with a
+    /// [`ResourceLimiter`](crate::ResourceLimiter).
+    ///
     /// ## When to use fuel vs. epochs
     ///
     /// In general, epoch-based interruption results in faster
@@ -775,8 +794,8 @@ impl Config {
     ///
     /// With this enabled, compiled code compares the stack pointer with the
     /// store's stack limit at the entry of every function that can call
-    /// another wasm function, at every loop header and between the chunks of
-    /// a bulk memory operation. A failed compare does not trap: it calls into
+    /// another wasm function, at every loop header and before each bulk
+    /// memory operation. A failed compare does not trap: it calls into
     /// the runtime, which either delivers a pending interruption or raises
     /// the ordinary stack-overflow trap when the stack really is exhausted.
     ///
@@ -4791,6 +4810,7 @@ fn detect_host_feature(feature: &str) -> Option<bool> {
             "paca" => Some(std::arch::is_aarch64_feature_detected!("paca")),
             "fp16" => Some(std::arch::is_aarch64_feature_detected!("fp16")),
             "dotprod" => Some(std::arch::is_aarch64_feature_detected!("dotprod")),
+            "i8mm" => Some(std::arch::is_aarch64_feature_detected!("i8mm")),
 
             _ => None,
         };
@@ -4846,6 +4866,7 @@ fn detect_host_feature(feature: &str) -> Option<bool> {
             "avx" => Some(std::is_x86_feature_detected!("avx")),
             "avx2" => Some(std::is_x86_feature_detected!("avx2")),
             "fma" => Some(std::is_x86_feature_detected!("fma")),
+            "avxvnni" => Some(std::is_x86_feature_detected!("avxvnni")),
             "bmi1" => Some(std::is_x86_feature_detected!("bmi1")),
             "bmi2" => Some(std::is_x86_feature_detected!("bmi2")),
             "avx512bitalg" => Some(std::is_x86_feature_detected!("avx512bitalg")),
@@ -4853,6 +4874,7 @@ fn detect_host_feature(feature: &str) -> Option<bool> {
             "avx512f" => Some(std::is_x86_feature_detected!("avx512f")),
             "avx512vl" => Some(std::is_x86_feature_detected!("avx512vl")),
             "avx512vbmi" => Some(std::is_x86_feature_detected!("avx512vbmi")),
+            "avx512vnni" => Some(std::is_x86_feature_detected!("avx512vnni")),
             "lzcnt" => Some(std::is_x86_feature_detected!("lzcnt")),
 
             _ => None,

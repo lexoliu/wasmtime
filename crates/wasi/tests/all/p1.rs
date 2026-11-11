@@ -7,6 +7,14 @@ use wasmtime_wasi::p1::{WasiP1Ctx, add_to_linker_async};
 use wasmtime_wasi::{WasiCtxBuilder, WasiView};
 
 async fn run(path: &str, with_builder: impl FnOnce(&mut WasiCtxBuilder)) -> Result<()> {
+    run_with_workspace_setup(path, |_| Ok(()), with_builder).await
+}
+
+async fn run_with_workspace_setup(
+    path: &str,
+    setup: impl FnOnce(&Path) -> Result<()>,
+    with_builder: impl FnOnce(&mut WasiCtxBuilder),
+) -> Result<()> {
     let path = Path::new(path);
     let name = path.file_stem().unwrap().to_str().unwrap();
     let engine = test_programs_artifacts::engine(|_config| {});
@@ -14,7 +22,7 @@ async fn run(path: &str, with_builder: impl FnOnce(&mut WasiCtxBuilder)) -> Resu
     add_to_linker_async(&mut linker, |t| &mut t.wasi)?;
 
     let module = Module::from_file(&engine, path)?;
-    let (mut store, _td) = Ctx::new(&engine, name, |builder| {
+    let (mut store, _td) = Ctx::new_with_workspace_setup(&engine, name, setup, |builder| {
         with_builder(builder);
         builder.build_p1()
     })?;
@@ -68,6 +76,17 @@ async fn p1_fd_filestat_get() {
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn p1_fd_filestat_set() {
     run(P1_FD_FILESTAT_SET, |_| {}).await.unwrap()
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p1_stat_extreme_host_mtime() {
+    run_with_workspace_setup(
+        P1_STAT_EXTREME_HOST_MTIME,
+        crate::store::prepare_extreme_mtime_fixture,
+        |_| {},
+    )
+    .await
+    .unwrap()
 }
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn p1_fd_flags_set() {
@@ -184,6 +203,18 @@ async fn p1_poll_oneoff_stdio() {
 async fn p1_readlink() {
     run(P1_READLINK, |_| {}).await.unwrap()
 }
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+async fn p1_path_rename_trailing_slashes() {
+    let fixture = crate::store::SandboxFixture::new().unwrap();
+    run(P1_PATH_RENAME_TRAILING_SLASHES, |b| {
+        fixture.configure_wasi(b)
+    })
+    .await
+    .expect("run guest");
+    fixture.assert_secure();
+}
+
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn p1_remove_directory() {
     run(P1_REMOVE_DIRECTORY, |_| {}).await.unwrap()
@@ -281,7 +312,7 @@ async fn p1_file_truncation_readonly() {
 
 async fn run_with_readonly_testfile(component_path: &str) {
     use std::path::PathBuf;
-    use wasmtime_wasi::{DirPerms, FilePerms};
+    use wasmtime_wasi::FsPerms;
 
     let prefix = format!("wasi_components_ro_");
     let tempdir = tempfile::Builder::new()
@@ -295,13 +326,8 @@ async fn run_with_readonly_testfile(component_path: &str) {
     std::fs::write(&file, EXPECTED_CONTENTS).expect("write truncation test file");
 
     run(component_path, |b| {
-        b.preopened_dir(
-            tempdir.path(),
-            "readonly",
-            DirPerms::READ | DirPerms::MUTATE,
-            FilePerms::READ,
-        )
-        .unwrap();
+        b.preopened_dir(tempdir.path(), "readonly", FsPerms::ReadOnly)
+            .unwrap();
     })
     .await
     .expect("run guest");
