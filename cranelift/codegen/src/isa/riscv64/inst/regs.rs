@@ -28,7 +28,6 @@ pub fn writable_a0() -> Writable<Reg> {
     Writable::from_reg(a0())
 }
 #[inline]
-#[cfg(test)]
 pub fn writable_a1() -> Writable<Reg> {
     Writable::from_reg(a1())
 }

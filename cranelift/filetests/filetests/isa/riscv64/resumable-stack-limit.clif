@@ -1,0 +1,982 @@
+test compile precise-output
+set enable_probestack=true
+set probestack_strategy=inline
+set preserve_frame_pointers=true
+set enable_multi_ret_implicit_sret=true
+set unwind_info=false
+target riscv64
+
+;; A frame of exactly `min_frame` bytes is not checked: the prologue is the
+;; one of the same function without the declaration.
+
+function %at_min_frame(i64 vmctx, i64) -> i64 tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 1024
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   addi sp,sp,-1024
+; block0:
+;   mv a0,a1
+;   addi sp,sp,1024
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   addi sp, sp, -0x400
+; block1: ; offset 0x14
+;   mv a0, a1
+;   addi sp, sp, 0x400
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+function %at_min_frame_plain(i64 vmctx, i64) -> i64 tail {
+    ss0 = explicit_slot 1024
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   addi sp,sp,-1024
+; block0:
+;   mv a0,a1
+;   addi sp,sp,1024
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   addi sp, sp, -0x400
+; block1: ; offset 0x14
+;   mv a0, a1
+;   addi sp, sp, 0x400
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; A frame above `min_frame` with the limit in the processor's local block:
+;; the check follows the frame record and precedes the probes. `vmctx` is in
+;; `a0` and is passed as it is; the second argument in `a1` is kept in `t4`.
+
+function %processor_local(i64 vmctx, i64) -> i64 tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t5,16(tp)
+;   lui t6,2
+;   sub t6,sp,t6
+;   sltu t4,sp,t6
+;   addi t4,t4,-1
+;   and t6,t6,t4
+;   stack_limit_call t6,t5##vmctx=a0 save_a0=false save_a1=true TestCase(%stack_limit_interrupt)
+;   lui t3,-1
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   lui t6,2
+;   add sp,sp,t6
+;   lui t6,-2
+;   add sp,sp,t6
+; block0:
+;   mv a0,a1
+;   lui t6,2
+;   add sp,sp,t6
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t5, 0x10(tp)
+;   lui t6, 2
+;   sub t6, sp, t6
+;   sltu t4, sp, t6
+;   addi t4, t4, -1
+;   and t6, t6, t4
+;   bgeu t6, t5, 0x1c
+;   mv t4, a1
+;   mv a1, t6
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %stack_limit_interrupt 0
+;   jalr ra
+;   ld ra, 8(s0)
+;   mv a1, t4
+;   lui t3, 0xfffff
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   lui t6, 2
+;   add sp, sp, t6
+;   lui t6, 0xffffe
+;   add sp, sp, t6
+; block1: ; offset 0x68
+;   mv a0, a1
+;   lui t6, 2
+;   add sp, sp, t6
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; The same with the limit reached through global values, like
+;; `stack_limit`: `vmctx`'s store context, then its limit word. The chain
+;; ends in `t6`, so the target is computed in `t5`.
+
+function %global_chain(i64 vmctx, i64) -> i64 tail {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned readonly gv0+8
+    gv2 = load.i64 notrap aligned gv1+24
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = gv2, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t6,8(a0)
+;   ld t6,24(t6)
+;   lui t5,2
+;   sub t5,sp,t5
+;   sltu t4,sp,t5
+;   addi t4,t4,-1
+;   and t5,t5,t4
+;   stack_limit_call t5,t6##vmctx=a0 save_a0=false save_a1=true TestCase(%stack_limit_interrupt)
+;   lui t3,-1
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   lui t6,2
+;   add sp,sp,t6
+;   lui t6,-2
+;   add sp,sp,t6
+; block0:
+;   mv a0,a1
+;   lui t6,2
+;   add sp,sp,t6
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t6, 8(a0)
+;   ld t6, 0x18(t6)
+;   lui t5, 2
+;   sub t5, sp, t5
+;   sltu t4, sp, t5
+;   addi t4, t4, -1
+;   and t5, t5, t4
+;   bgeu t5, t6, 0x1c
+;   mv t4, a1
+;   mv a1, t5
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %stack_limit_interrupt 0
+;   jalr ra
+;   ld ra, 8(s0)
+;   mv a1, t4
+;   lui t3, 0xfffff
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   lui t6, 2
+;   add sp, sp, t6
+;   lui t6, 0xffffe
+;   add sp, sp, t6
+; block1: ; offset 0x6c
+;   mv a0, a1
+;   lui t6, 2
+;   add sp, sp, t6
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; A frame above `min_frame` replaces the trapping `stack_limit` check: no
+;; trap is left.
+
+function %with_stack_limit_over(i64 vmctx, i64) -> i64 tail {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned readonly gv0+8
+    gv2 = load.i64 notrap aligned gv1+24
+    stack_limit = gv2
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t5,16(tp)
+;   lui t6,2
+;   sub t6,sp,t6
+;   sltu t4,sp,t6
+;   addi t4,t4,-1
+;   and t6,t6,t4
+;   stack_limit_call t6,t5##vmctx=a0 save_a0=false save_a1=true TestCase(%stack_limit_interrupt)
+;   lui t3,-1
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   lui t6,2
+;   add sp,sp,t6
+;   lui t6,-2
+;   add sp,sp,t6
+; block0:
+;   mv a0,a1
+;   lui t6,2
+;   add sp,sp,t6
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t5, 0x10(tp)
+;   lui t6, 2
+;   sub t6, sp, t6
+;   sltu t4, sp, t6
+;   addi t4, t4, -1
+;   and t6, t6, t4
+;   bgeu t6, t5, 0x1c
+;   mv t4, a1
+;   mv a1, t6
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %stack_limit_interrupt 0
+;   jalr ra
+;   ld ra, 8(s0)
+;   mv a1, t4
+;   lui t3, 0xfffff
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   lui t6, 2
+;   add sp, sp, t6
+;   lui t6, 0xffffe
+;   add sp, sp, t6
+; block1: ; offset 0x68
+;   mv a0, a1
+;   lui t6, 2
+;   add sp, sp, t6
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; A frame of at most `min_frame` keeps the trapping `stack_limit` check.
+
+function %with_stack_limit_small(i64 vmctx, i64) -> i64 tail {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned readonly gv0+8
+    gv2 = load.i64 notrap aligned gv1+24
+    stack_limit = gv2
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 512
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t6,8(a0)
+;   ld t6,24(t6)
+;   addi t6,t6,512
+;   trap_if stk_ovf##(sp ult t6)
+;   addi sp,sp,-512
+; block0:
+;   mv a0,a1
+;   addi sp,sp,512
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t6, 8(a0)
+;   ld t6, 0x18(t6)
+;   addi t6, t6, 0x200
+;   bgeu sp, t6, 8
+;   .byte 0x00, 0x00, 0x00, 0x00 ; trap: stk_ovf
+;   addi sp, sp, -0x200
+; block1: ; offset 0x28
+;   mv a0, a1
+;   addi sp, sp, 0x200
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; `system_v` passes `vmctx` in `a0` and the second argument in `a1`: `a0` is
+;; passed on as it is, and `a1` is kept in `t4`.
+
+function %vmctx_in_a0(i64 vmctx, i64) -> i64 system_v {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t5,16(tp)
+;   lui t6,2
+;   sub t6,sp,t6
+;   sltu t4,sp,t6
+;   addi t4,t4,-1
+;   and t6,t6,t4
+;   stack_limit_call t6,t5##vmctx=a0 save_a0=false save_a1=true TestCase(%stack_limit_interrupt)
+;   lui t3,-1
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   lui t6,2
+;   add sp,sp,t6
+;   lui t6,-2
+;   add sp,sp,t6
+; block0:
+;   mv a0,a1
+;   lui t6,2
+;   add sp,sp,t6
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t5, 0x10(tp)
+;   lui t6, 2
+;   sub t6, sp, t6
+;   sltu t4, sp, t6
+;   addi t4, t4, -1
+;   and t6, t6, t4
+;   bgeu t6, t5, 0x1c
+;   mv t4, a1
+;   mv a1, t6
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %stack_limit_interrupt 0
+;   jalr ra
+;   ld ra, 8(s0)
+;   mv a1, t4
+;   lui t3, 0xfffff
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   lui t6, 2
+;   add sp, sp, t6
+;   lui t6, 0xffffe
+;   add sp, sp, t6
+; block1: ; offset 0x68
+;   mv a0, a1
+;   lui t6, 2
+;   add sp, sp, t6
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; With `vmctx` second, `a0` and `a1` are both kept, and `vmctx` is read from
+;; `a1` before the target is written there.
+
+function %vmctx_in_a1(i64, i64 vmctx) -> i64 system_v {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return v0
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t5,16(tp)
+;   lui t6,2
+;   sub t6,sp,t6
+;   sltu t4,sp,t6
+;   addi t4,t4,-1
+;   and t6,t6,t4
+;   stack_limit_call t6,t5##vmctx=a1 save_a0=true save_a1=true TestCase(%stack_limit_interrupt)
+;   lui t3,-1
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   lui t6,2
+;   add sp,sp,t6
+;   lui t6,-2
+;   add sp,sp,t6
+; block0:
+;   lui t6,2
+;   add sp,sp,t6
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t5, 0x10(tp)
+;   lui t6, 2
+;   sub t6, sp, t6
+;   sltu t4, sp, t6
+;   addi t4, t4, -1
+;   and t6, t6, t4
+;   bgeu t6, t5, 0x28
+;   mv t3, a0
+;   mv t4, a1
+;   mv a0, a1
+;   mv a1, t6
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %stack_limit_interrupt 0
+;   jalr ra
+;   ld ra, 8(s0)
+;   mv a0, t3
+;   mv a1, t4
+;   lui t3, 0xfffff
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   lui t6, 2
+;   add sp, sp, t6
+;   lui t6, 0xffffe
+;   add sp, sp, t6
+; block1: ; offset 0x74
+;   lui t6, 2
+;   add sp, sp, t6
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; Nine results do not fit the return registers, so the implicit return-area
+;; pointer takes `a0` and `vmctx` moves to `a1`.
+
+function %return_area(i64 vmctx) -> i64, i64, i64, i64, i64, i64, i64, i64, i64 system_v {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64):
+    return v0, v0, v0, v0, v0, v0, v0, v0, v0
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t5,16(tp)
+;   lui t6,2
+;   sub t6,sp,t6
+;   sltu t4,sp,t6
+;   addi t4,t4,-1
+;   and t6,t6,t4
+;   stack_limit_call t6,t5##vmctx=a1 save_a0=true save_a1=true TestCase(%stack_limit_interrupt)
+;   lui t3,-1
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   lui t6,2
+;   add sp,sp,t6
+;   lui t6,-2
+;   add sp,sp,t6
+; block0:
+;   sd a1,0(a0)
+;   sd a1,8(a0)
+;   sd a1,16(a0)
+;   sd a1,24(a0)
+;   sd a1,32(a0)
+;   sd a1,40(a0)
+;   sd a1,48(a0)
+;   mv a0,a1
+;   lui t6,2
+;   add sp,sp,t6
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t5, 0x10(tp)
+;   lui t6, 2
+;   sub t6, sp, t6
+;   sltu t4, sp, t6
+;   addi t4, t4, -1
+;   and t6, t6, t4
+;   bgeu t6, t5, 0x28
+;   mv t3, a0
+;   mv t4, a1
+;   mv a0, a1
+;   mv a1, t6
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %stack_limit_interrupt 0
+;   jalr ra
+;   ld ra, 8(s0)
+;   mv a0, t3
+;   mv a1, t4
+;   lui t3, 0xfffff
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   lui t6, 2
+;   add sp, sp, t6
+;   lui t6, 0xffffe
+;   add sp, sp, t6
+; block1: ; offset 0x74
+;   sd a1, 0(a0)
+;   sd a1, 8(a0)
+;   sd a1, 0x10(a0)
+;   sd a1, 0x18(a0)
+;   sd a1, 0x20(a0)
+;   sd a1, 0x28(a0)
+;   sd a1, 0x30(a0)
+;   mv a0, a1
+;   lui t6, 2
+;   add sp, sp, t6
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; A frame above 32 KiB: the probes follow the check.
+
+function %above_32k(i64 vmctx, i64) -> i64 tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 40000
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t5,16(tp)
+;   lui t6,10
+;   addi t6,t6,-960
+;   sub t6,sp,t6
+;   sltu t4,sp,t6
+;   addi t4,t4,-1
+;   and t6,t6,t4
+;   stack_limit_call t6,t5##vmctx=a0 save_a0=false save_a1=true TestCase(%stack_limit_interrupt)
+;   inline_stack_probe##guard_size=4096 probe_count=9 tmp=t3
+;   lui t6,-10
+;   addi t6,t6,960
+;   add sp,sp,t6
+; block0:
+;   mv a0,a1
+;   lui t6,10
+;   addi t6,t6,-960
+;   add sp,sp,t6
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t5, 0x10(tp)
+;   lui t6, 0xa
+;   addi t6, t6, -0x3c0
+;   sub t6, sp, t6
+;   sltu t4, sp, t6
+;   addi t4, t4, -1
+;   and t6, t6, t4
+;   bgeu t6, t5, 0x1c
+;   mv t4, a1
+;   mv a1, t6
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %stack_limit_interrupt 0
+;   jalr ra
+;   ld ra, 8(s0)
+;   mv a1, t4
+;   lui t6, 9
+;   lui t3, 1
+;   bgeu t3, t6, 0x14
+;   sub t5, sp, t6
+;   sb zero, 0(t5) ; trap: heap_oob
+;   sub t6, t6, t3
+;   j -0x10
+;   lui t6, 0xffff6
+;   addi t6, t6, 0x3c0
+;   add sp, sp, t6
+; block1: ; offset 0x70
+;   mv a0, a1
+;   lui t6, 0xa
+;   addi t6, t6, -0x3c0
+;   add sp, sp, t6
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; A frame size that fits an `imm12`: the target is one `addi`.
+
+function %imm12(i64 vmctx, i64) -> i64 tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 1500
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t5,16(tp)
+;   addi t6,sp,-1504
+;   sltu t4,sp,t6
+;   addi t4,t4,-1
+;   and t6,t6,t4
+;   stack_limit_call t6,t5##vmctx=a0 save_a0=false save_a1=true TestCase(%stack_limit_interrupt)
+;   addi sp,sp,-1504
+; block0:
+;   mv a0,a1
+;   addi sp,sp,1504
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t5, 0x10(tp)
+;   addi t6, sp, -0x5e0
+;   sltu t4, sp, t6
+;   addi t4, t4, -1
+;   and t6, t6, t4
+;   bgeu t6, t5, 0x1c
+;   mv t4, a1
+;   mv a1, t6
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %stack_limit_interrupt 0
+;   jalr ra
+;   ld ra, 8(s0)
+;   mv a1, t4
+;   addi sp, sp, -0x5e0
+; block1: ; offset 0x44
+;   mv a0, a1
+;   addi sp, sp, 0x5e0
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; A frame size that is no `imm12`, so the constant goes through
+;; `load_constant_u32` into the target register.
+
+function %not_imm12(i64 vmctx, i64) -> i64 tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 5000
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t5,16(tp)
+;   lui t6,1
+;   addi t6,t6,912
+;   sub t6,sp,t6
+;   sltu t4,sp,t6
+;   addi t4,t4,-1
+;   and t6,t6,t4
+;   stack_limit_call t6,t5##vmctx=a0 save_a0=false save_a1=true TestCase(%stack_limit_interrupt)
+;   lui t3,-1
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   lui t6,1
+;   add sp,sp,t6
+;   lui t6,-1
+;   addi t6,t6,-912
+;   add sp,sp,t6
+; block0:
+;   mv a0,a1
+;   lui t6,1
+;   addi t6,t6,912
+;   add sp,sp,t6
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t5, 0x10(tp)
+;   lui t6, 1
+;   addi t6, t6, 0x390
+;   sub t6, sp, t6
+;   sltu t4, sp, t6
+;   addi t4, t4, -1
+;   and t6, t6, t4
+;   bgeu t6, t5, 0x1c
+;   mv t4, a1
+;   mv a1, t6
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %stack_limit_interrupt 0
+;   jalr ra
+;   ld ra, 8(s0)
+;   mv a1, t4
+;   lui t3, 0xfffff
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   lui t6, 1
+;   add sp, sp, t6
+;   lui t6, 0xfffff
+;   addi t6, t6, -0x390
+;   add sp, sp, t6
+; block1: ; offset 0x68
+;   mv a0, a1
+;   lui t6, 1
+;   addi t6, t6, 0x390
+;   add sp, sp, t6
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+;; A `tail` function whose `return_call` passes more stack arguments than it
+;; received: the clobber-save sequence rewrites the frame record from the
+;; live `ra` after the check, so the check reloads it.
+
+function %grows_stack_args(i64 vmctx, i64) -> i64 tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    sig1 = (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 tail
+    fn1 = colocated %callee sig1
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return_call fn1(v0, v1, v1, v1, v1, v1, v1, v1, v1, v1, v1, v1)
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   ld t5,16(tp)
+;   lui t6,2
+;   addi t6,t6,48
+;   sub t6,sp,t6
+;   sltu t4,sp,t6
+;   addi t4,t4,-1
+;   and t6,t6,t4
+;   stack_limit_call t6,t5##vmctx=a0 save_a0=false save_a1=true TestCase(%stack_limit_interrupt)
+;   lui t3,-1
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   add sp,sp,t3
+;   sw zero,0(sp)
+;   lui t6,2
+;   add sp,sp,t6
+;   addi sp,sp,-32
+;   sd ra,8(sp)
+;   ld fp,32(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   lui t6,-2
+;   add sp,sp,t6
+; block0:
+;   sd a1,-32(incoming_arg)
+;   sd a1,-24(incoming_arg)
+;   sd a1,-16(incoming_arg)
+;   sd a1,-8(incoming_arg)
+;   mv a7,a1
+;   mv a2,a7
+;   mv a3,a7
+;   mv a4,a7
+;   mv a5,a7
+;   mv a6,a7
+;   return_call TestCase(%callee) new_stack_arg_size:32 a0=a0 a1=a1 a2=a2 a3=a3 a4=a4 a5=a5 a6=a6 a7=a7
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   ld t5, 0x10(tp)
+;   lui t6, 2
+;   addi t6, t6, 0x30
+;   sub t6, sp, t6
+;   sltu t4, sp, t6
+;   addi t4, t4, -1
+;   and t6, t6, t4
+;   bgeu t6, t5, 0x1c
+;   mv t4, a1
+;   mv a1, t6
+;   auipc ra, 0 ; reloc_external RiscvCallPlt %stack_limit_interrupt 0
+;   jalr ra
+;   ld ra, 8(s0)
+;   mv a1, t4
+;   lui t3, 0xfffff
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   add sp, sp, t3
+;   sw zero, 0(sp)
+;   lui t6, 2
+;   add sp, sp, t6
+;   addi sp, sp, -0x20
+;   sd ra, 8(sp)
+;   ld s0, 0x20(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   lui t6, 0xffffe
+;   add sp, sp, t6
+; block1: ; offset 0x80
+;   lui t6, 2
+;   addi t6, t6, 0x10
+;   add t6, t6, sp
+;   sd a1, 0(t6)
+;   lui t6, 2
+;   addi t6, t6, 0x18
+;   add t6, t6, sp
+;   sd a1, 0(t6)
+;   lui t6, 2
+;   addi t6, t6, 0x20
+;   add t6, t6, sp
+;   sd a1, 0(t6)
+;   lui t6, 2
+;   addi t6, t6, 0x28
+;   add t6, t6, sp
+;   sd a1, 0(t6)
+;   mv a7, a1
+;   mv a2, a7
+;   mv a3, a7
+;   mv a4, a7
+;   mv a5, a7
+;   mv a6, a7
+;   lui t6, 2
+;   addi t6, t6, 8
+;   add t6, t6, sp
+;   ld ra, 0(t6)
+;   lui t6, 2
+;   add t6, t6, sp
+;   ld s0, 0(t6)
+;   lui t6, 2
+;   addi t6, t6, 0x10
+;   add sp, sp, t6
+;   auipc t6, 0 ; reloc_external RiscvCallPlt %callee 0
+;   jr t6
+

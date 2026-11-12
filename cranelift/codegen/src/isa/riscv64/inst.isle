@@ -288,6 +288,22 @@
       (probe_count u32)
       (tmp WritableReg))
 
+    ;; The resumable stack check of a large frame, emitted in the prologue
+    ;; after regalloc (see `gen_resumable_stack_check`). It compares `target`,
+    ;; the lowest address the frame would reach, with `limit` and, when
+    ;; `target` is below it, calls `call` with `vmctx` in `a0` and `target`
+    ;; in `a1`, keeping `a0` (in `t3`) and `a1` (in `t4`) when `save_a0` and
+    ;; `save_a1` say they hold a value the function still needs, then reloads
+    ;; `ra` from the frame record. Every other register survives the
+    ;; `preserve_all` callee. `t3` and `t4` are written only in these cases.
+    (StackLimitCall
+      (limit Reg)
+      (target Reg)
+      (vmctx Reg)
+      (save_a0 bool)
+      (save_a1 bool)
+      (call BoxCallInfo))
+
     (VecAluRRRR
       (op VecAluOpRRRR)
       (vd WritableReg)
