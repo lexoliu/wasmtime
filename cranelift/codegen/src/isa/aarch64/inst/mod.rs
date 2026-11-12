@@ -927,6 +927,8 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_early_def(start);
             collector.reg_use(end);
         }
+        // Emitted after register allocation, with real registers only.
+        Inst::StackLimitCall { .. } => {}
     }
 }
 
@@ -2918,6 +2920,23 @@ impl Inst {
                 let end = pretty_print_reg(end);
                 let step = step.pretty_print(0);
                 format!("stack_probe_loop {start}, {end}, {step}")
+            }
+            &Inst::StackLimitCall {
+                limit,
+                target,
+                vmctx,
+                save_x0,
+                save_x1,
+                ref call,
+            } => {
+                let limit = pretty_print_reg(limit);
+                let target = pretty_print_reg(target);
+                let vmctx = pretty_print_reg(vmctx);
+                format!(
+                    "stack_limit_call {target}, {limit}, vmctx={vmctx}, save_x0={save_x0}, \
+                     save_x1={save_x1}, {:?}",
+                    call.dest
+                )
             }
         }
     }

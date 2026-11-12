@@ -3653,6 +3653,93 @@ impl MachInstEmit for Inst {
                 .emit(sink, emit_info, state);
                 sink.bind_label(loop_end, &mut state.ctrl_plane);
             }
+
+            &Inst::StackLimitCall {
+                limit,
+                target,
+                vmctx,
+                save_x0,
+                save_x1,
+                ref call,
+            } => {
+                let x0 = writable_xreg(0);
+                let x1 = writable_xreg(1);
+                // Neither is an argument register of any calling convention
+                // or the register of anything the prologue has saved yet, so
+                // no value of the function is in them, and the `preserve_all`
+                // callee returns them as they are.
+                let save0 = writable_xreg(9);
+                let save1 = writable_xreg(10);
+                let mov = |rd: Writable<Reg>, rm: Reg| Inst::Mov {
+                    size: OperandSize::Size64,
+                    rd,
+                    rm,
+                };
+
+                // Nothing to do when the frame stays above the limit:
+                //
+                //         cmp  target, limit
+                //         b.hs .done
+                Inst::AluRRR {
+                    alu_op: ALUOp::SubS,
+                    size: OperandSize::Size64,
+                    rd: writable_zero_reg(),
+                    rn: target,
+                    rm: limit,
+                }
+                .emit(sink, emit_info, state);
+                let done = sink.get_label();
+                let call_start = sink.get_label();
+                Inst::CondBr {
+                    taken: BranchTarget::Label(done),
+                    not_taken: BranchTarget::Label(call_start),
+                    kind: CondBrKind::Cond(Cond::Hs),
+                }
+                .emit(sink, emit_info, state);
+                sink.bind_label(call_start, &mut state.ctrl_plane);
+
+                // The callee takes `(vmctx, target)` in `x0` and `x1`, and
+                // keeps every other register. Move what the function still
+                // needs out of the way of those two, call, and move it back.
+                // `vmctx` is read before `x1` is written, since it may be in
+                // `x1` itself.
+                if save_x0 {
+                    mov(save0, x0.to_reg()).emit(sink, emit_info, state);
+                }
+                if save_x1 {
+                    mov(save1, x1.to_reg()).emit(sink, emit_info, state);
+                }
+                if vmctx != x0.to_reg() {
+                    mov(x0, vmctx).emit(sink, emit_info, state);
+                }
+                mov(x1, target).emit(sink, emit_info, state);
+
+                Inst::Call { info: call.clone() }.emit(sink, emit_info, state);
+
+                // `bl` wrote the link register. The frame record holds the
+                // value it had on entry, signed when the function signs its
+                // return address, and a `return_call` that grows the incoming
+                // argument area rewrites the record from the live register
+                // after this check, so it must be the entry value again.
+                Inst::ULoad64 {
+                    rd: writable_link_reg(),
+                    mem: AMode::RegOffset {
+                        rn: fp_reg(),
+                        off: 8,
+                    },
+                    flags: MemFlagsData::trusted(),
+                }
+                .emit(sink, emit_info, state);
+
+                if save_x0 {
+                    mov(x0, save0.to_reg()).emit(sink, emit_info, state);
+                }
+                if save_x1 {
+                    mov(x1, save1.to_reg()).emit(sink, emit_info, state);
+                }
+
+                sink.bind_label(done, &mut state.ctrl_plane);
+            }
         }
 
         let end_off = sink.cur_offset();

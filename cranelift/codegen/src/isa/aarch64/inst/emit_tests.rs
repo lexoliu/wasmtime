@@ -7929,6 +7929,71 @@ fn test_aarch64_binemit() {
 
     insns.push((Inst::Fence {}, "BF3B03D5", "dmb ish"));
 
+    // The resumable stack check of a large frame, one entry for each choice
+    // of registers kept around the call. The conditional branch skips the
+    // call, the link register reload and the restores; the `bl` carries a
+    // relocation, so its word is zero.
+    insns.push((
+        Inst::StackLimitCall {
+            limit: xreg(17),
+            target: xreg(16),
+            vmctx: xreg(2),
+            save_x0: false,
+            save_x1: false,
+            call: Box::new(CallInfo::empty(
+                ExternalName::testcase("test0"),
+                CallConv::PreserveAll,
+            )),
+        },
+        "1F0211EBA2000054E00302AAE10310AA00000094BE8340F8",
+        "stack_limit_call x16, x17, vmctx=x2, save_x0=false, save_x1=false, TestCase(%test0)",
+    ));
+    insns.push((
+        Inst::StackLimitCall {
+            limit: xreg(17),
+            target: xreg(16),
+            vmctx: xreg(0),
+            save_x0: false,
+            save_x1: true,
+            call: Box::new(CallInfo::empty(
+                ExternalName::testcase("test0"),
+                CallConv::PreserveAll,
+            )),
+        },
+        "1F0211EBC2000054EA0301AAE10310AA00000094BE8340F8E1030AAA",
+        "stack_limit_call x16, x17, vmctx=x0, save_x0=false, save_x1=true, TestCase(%test0)",
+    ));
+    insns.push((
+        Inst::StackLimitCall {
+            limit: xreg(17),
+            target: xreg(16),
+            vmctx: xreg(2),
+            save_x0: true,
+            save_x1: false,
+            call: Box::new(CallInfo::empty(
+                ExternalName::testcase("test0"),
+                CallConv::PreserveAll,
+            )),
+        },
+        "1F0211EBE2000054E90300AAE00302AAE10310AA00000094BE8340F8E00309AA",
+        "stack_limit_call x16, x17, vmctx=x2, save_x0=true, save_x1=false, TestCase(%test0)",
+    ));
+    insns.push((
+        Inst::StackLimitCall {
+            limit: xreg(16),
+            target: xreg(17),
+            vmctx: xreg(1),
+            save_x0: true,
+            save_x1: true,
+            call: Box::new(CallInfo::empty(
+                ExternalName::testcase("test0"),
+                CallConv::PreserveAll,
+            )),
+        },
+        "3F0210EB22010054E90300AAEA0301AAE00301AAE10311AA00000094BE8340F8E00309AAE1030AAA",
+        "stack_limit_call x17, x16, vmctx=x1, save_x0=true, save_x1=true, TestCase(%test0)",
+    ));
+
     let flags = settings::Flags::new(settings::builder());
     let isa_flags = aarch64::settings::Flags::new(&flags, &aarch64::settings::builder());
     let emit_info = EmitInfo::new(flags, isa_flags);

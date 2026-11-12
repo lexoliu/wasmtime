@@ -1020,7 +1020,24 @@
        ;; means that the internal codegen can't use these registers.
        (StackProbeLoop (start WritableReg)
                        (end Reg)
-                       (step Imm12))))
+                       (step Imm12))
+
+       ;; The resumable stack check of a large frame, emitted in the prologue
+       ;; after regalloc (see `gen_resumable_stack_check`). It compares
+       ;; `target`, the lowest address the frame would reach, with `limit`
+       ;; and, when `target` is below it, calls `call` with `vmctx` in `x0`
+       ;; and `target` in `x1`, keeping `x0` (in `x9`) and `x1` (in `x10`)
+       ;; when `save_x0` and `save_x1` say they hold a value the function
+       ;; still needs, then reloads the link register from the frame record.
+       ;; Every other register survives the `preserve_all` callee. `x9` and
+       ;; `x10` are written only in these cases, and nothing is kept in `x16`
+       ;; or `x17` across the call, since a veneer may write both.
+       (StackLimitCall (limit Reg)
+                       (target Reg)
+                       (vmctx Reg)
+                       (save_x0 bool)
+                       (save_x1 bool)
+                       (call BoxCallInfo))))
 
 (spec (MInst.AluRRImmLogic alu_op size rd rn imml)
       (provide

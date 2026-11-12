@@ -1,0 +1,194 @@
+test run
+set enable_probestack=true
+set probestack_strategy=inline
+set preserve_frame_pointers=true
+target aarch64
+
+;; The resumable stack check in the prologue of a frame above `min_frame`,
+;; run on the host. The processor-local source reads a privileged register
+;; and cannot run here, so the limit is reached through `vmctx` (a
+;; `Global`).
+;;
+;; `vmctx` is a four-word block in the driver's frame:
+;;   +0  the limit
+;;   +8  how many times `%callee` ran
+;;   +16 the target `%callee` was given
+;;   +24 the address of the checked function's stack slot, which is the lowest
+;;       address of its frame
+;;
+;; Each driver passes 0x1234 and 0x5678 as the other two arguments, the
+;; checked function returns three times the first plus the second (0x8d14),
+;; and the driver returns a word of three fields:
+;;   bits 0..7    how many times `%callee` ran
+;;   bits 8..15   1 when the target lies within 64 bytes below the slot
+;;   bits 16..23  1 when the result came back as 0x8d14
+;; With a limit of all ones the frame never fits, so `%callee` runs once with
+;; the target `sp - frame_size`, which is the frame's lowest address; with a
+;; limit of zero it never runs.
+
+function %callee(i64, i64) preserve_all {
+block0(v0: i64, v1: i64):
+    v2 = load.i64 notrap v0+8
+    v3 = iconst.i64 1
+    v4 = iadd v2, v3
+    store notrap v4, v0+8
+    store notrap v1, v0+16
+    return
+}
+
+;; `tail` passes its arguments from `x2` on: nothing is saved.
+
+function %checked_tail(i64 vmctx, i64, i64) -> i64 tail {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned gv0+0
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %callee sig0
+    resumable_stack_limit = gv1, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64, v2: i64):
+    v3 = stack_addr.i64 ss0
+    store notrap v3, v0+24
+    v4 = iconst.i64 3
+    v5 = imul v1, v4
+    v6 = iadd v5, v2
+    return v6
+}
+
+function %drive_tail(i64) -> i64 {
+    fn0 = colocated %checked_tail(i64 vmctx, i64, i64) -> i64 tail
+    ss0 = explicit_slot 32
+block0(v0: i64):
+    v1 = stack_addr.i64 ss0
+    v2 = iconst.i64 0
+    store notrap v0, v1
+    store notrap v2, v1+8
+    store notrap v2, v1+16
+    store notrap v2, v1+24
+    v3 = iconst.i64 0x1234
+    v4 = iconst.i64 0x5678
+    v5 = call fn0(v1, v3, v4)
+    v6 = load.i64 notrap v1+8
+    v7 = load.i64 notrap v1+16
+    v8 = load.i64 notrap v1+24
+    v9 = isub v8, v7
+    v10 = iconst.i64 64
+    v11 = icmp ult v9, v10
+    v12 = uextend.i64 v11
+    v13 = iconst.i64 8
+    v14 = ishl v12, v13
+    v15 = iconst.i64 0x8d14
+    v16 = icmp eq v5, v15
+    v17 = uextend.i64 v16
+    v18 = iconst.i64 16
+    v19 = ishl v17, v18
+    v20 = bor v6, v14
+    v21 = bor v20, v19
+    return v21
+}
+; run: %drive_tail(-1) == 0x10101
+; run: %drive_tail(0) == 0x10000
+
+;; `system_v` passes `vmctx` in `x0`, so only `x1` holds an argument to keep.
+
+function %checked_sysv(i64 vmctx, i64, i64) -> i64 system_v {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned gv0+0
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %callee sig0
+    resumable_stack_limit = gv1, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64, v2: i64):
+    v3 = stack_addr.i64 ss0
+    store notrap v3, v0+24
+    v4 = iconst.i64 3
+    v5 = imul v1, v4
+    v6 = iadd v5, v2
+    return v6
+}
+
+function %drive_sysv(i64) -> i64 {
+    fn0 = colocated %checked_sysv(i64 vmctx, i64, i64) -> i64 system_v
+    ss0 = explicit_slot 32
+block0(v0: i64):
+    v1 = stack_addr.i64 ss0
+    v2 = iconst.i64 0
+    store notrap v0, v1
+    store notrap v2, v1+8
+    store notrap v2, v1+16
+    store notrap v2, v1+24
+    v3 = iconst.i64 0x1234
+    v4 = iconst.i64 0x5678
+    v5 = call fn0(v1, v3, v4)
+    v6 = load.i64 notrap v1+8
+    v7 = load.i64 notrap v1+16
+    v8 = load.i64 notrap v1+24
+    v9 = isub v8, v7
+    v10 = iconst.i64 64
+    v11 = icmp ult v9, v10
+    v12 = uextend.i64 v11
+    v13 = iconst.i64 8
+    v14 = ishl v12, v13
+    v15 = iconst.i64 0x8d14
+    v16 = icmp eq v5, v15
+    v17 = uextend.i64 v16
+    v18 = iconst.i64 16
+    v19 = ishl v17, v18
+    v20 = bor v6, v14
+    v21 = bor v20, v19
+    return v21
+}
+; run: %drive_sysv(-1) == 0x10101
+; run: %drive_sysv(0) == 0x10000
+
+;; With `vmctx` second, `x0` and `x1` both hold a value to keep, and `vmctx`
+;; is read from `x1` before the target is written there.
+
+function %checked_vmctx_second(i64, i64 vmctx, i64) -> i64 system_v {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned gv0+0
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %callee sig0
+    resumable_stack_limit = gv1, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64, v2: i64):
+    v3 = stack_addr.i64 ss0
+    store notrap v3, v1+24
+    v4 = iconst.i64 3
+    v5 = imul v0, v4
+    v6 = iadd v5, v2
+    return v6
+}
+
+function %drive_vmctx_second(i64) -> i64 {
+    fn0 = colocated %checked_vmctx_second(i64, i64 vmctx, i64) -> i64 system_v
+    ss0 = explicit_slot 32
+block0(v0: i64):
+    v1 = stack_addr.i64 ss0
+    v2 = iconst.i64 0
+    store notrap v0, v1
+    store notrap v2, v1+8
+    store notrap v2, v1+16
+    store notrap v2, v1+24
+    v3 = iconst.i64 0x1234
+    v4 = iconst.i64 0x5678
+    v5 = call fn0(v3, v1, v4)
+    v6 = load.i64 notrap v1+8
+    v7 = load.i64 notrap v1+16
+    v8 = load.i64 notrap v1+24
+    v9 = isub v8, v7
+    v10 = iconst.i64 64
+    v11 = icmp ult v9, v10
+    v12 = uextend.i64 v11
+    v13 = iconst.i64 8
+    v14 = ishl v12, v13
+    v15 = iconst.i64 0x8d14
+    v16 = icmp eq v5, v15
+    v17 = uextend.i64 v16
+    v18 = iconst.i64 16
+    v19 = ishl v17, v18
+    v20 = bor v6, v14
+    v21 = bor v20, v19
+    return v21
+}
+; run: %drive_vmctx_second(-1) == 0x10101
+; run: %drive_vmctx_second(0) == 0x10000
