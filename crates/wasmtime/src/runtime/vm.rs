@@ -233,6 +233,12 @@ pub unsafe trait VMStore: 'static {
     /// pending stack-limit interruption. Runs the store's interrupt callback.
     fn stack_limit_interrupted(&mut self) -> Result<crate::InterruptAction>;
 
+    /// Callback invoked when wasm or a wasm entry runs at a stack pointer
+    /// `sp` below the reserve limit. Runs the store's stack-reserve callback
+    /// and returns the new reserve limit, which is at most `sp`; it errors if
+    /// the callback does or answers a limit above `sp`.
+    fn stack_reserve_reached(&mut self, sp: usize) -> Result<usize>;
+
     #[cfg(feature = "component-model-async")]
     fn component_async_store(
         &mut self,

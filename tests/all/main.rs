@@ -54,6 +54,7 @@ mod relocs;
 mod stack_creator;
 mod stack_limit_interruption;
 mod stack_overflow;
+mod stack_reserve;
 #[cfg(all(
     feature = "stack-switching",
     target_os = "linux",

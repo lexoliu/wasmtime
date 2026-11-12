@@ -308,7 +308,8 @@ macro_rules! for_each_vm_type {
 
                 /// Current stack limit of the wasm module, as compiled code reads it.
                 ///
-                /// This is the store's real limit (`real_stack_limit`) except while a
+                /// This is the store's real limit (`real_stack_limit`), raised to
+                /// `reserve_stack_limit` when that is higher, except while a
                 /// stack-limit interruption is pending, when it holds
                 /// [`VMStoreContext::INTERRUPT_SENTINEL`]. It is atomic because a
                 /// [`StoreInterruptHandle`](crate::StoreInterruptHandle) stores the
@@ -459,6 +460,14 @@ macro_rules! for_each_vm_type {
                 /// running the store writes it, interrupt requesters read it. Unused
                 /// unless `per_processor_stack_limit`. Host-only.
                 pub processor_stack_limit: AtomicPtr<usize>,
+
+                /// The lowest stack pointer at which the embedder guarantees its host
+                /// reserve is committed below the running fiber's stack, or 0 when the
+                /// store has no stack-reserve callback. The published stack limit is
+                /// `max(real_stack_limit, reserve_stack_limit)`. Only the thread running
+                /// the store reads or writes it, like `real_stack_limit`; swapped per
+                /// fiber. Host-only.
+                pub reserve_stack_limit: UnsafeCell<usize>,
             }
 
             /// JIT-visible representation of the store's current thread for the component

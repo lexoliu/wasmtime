@@ -248,6 +248,8 @@ pub struct StoreInner<T: 'static> {
         Option<Box<dyn FnMut(StoreContextMut<T>) -> Result<UpdateDeadline> + Send + Sync>>,
     interrupt_behavior:
         Option<Box<dyn FnMut(StoreContextMut<T>) -> Result<InterruptAction> + Send + Sync>>,
+    stack_reserve_behavior:
+        Option<Box<dyn FnMut(StoreContextMut<T>, usize) -> Result<usize> + Send + Sync>>,
 
     /// The user's `T` data.
     ///
@@ -578,6 +580,12 @@ pub struct StoreOpaque {
     /// guest code.
     pkey: Option<ProtectionKey>,
 
+    /// Whether [`Store::stack_reserve_callback`] was installed, which a fresh
+    /// fiber's reserve limit follows: `usize::MAX` (so its first wasm entry
+    /// calls the callback) when set, 0 otherwise.
+    #[cfg(feature = "async")]
+    stack_reserve_enabled: bool,
+
     /// State related to the executor of wasm code.
     ///
     /// For example if Pulley is enabled and configured then this will store a
@@ -818,6 +826,8 @@ impl<T> Store<T> {
             hostcall_val_storage: Vec::new(),
             wasm_val_raw_storage: TryVec::new(),
             pkey,
+            #[cfg(feature = "async")]
+            stack_reserve_enabled: false,
             executor: Executor::new(engine)?,
             #[cfg(feature = "debug")]
             breakpoints: Default::default(),
@@ -831,6 +841,7 @@ impl<T> Store<T> {
             #[cfg(target_has_atomic = "64")]
             epoch_deadline_behavior: None,
             interrupt_behavior: None,
+            stack_reserve_behavior: None,
             data_no_provenance: ManuallyDrop::new(data),
             #[cfg(feature = "debug")]
             debug_handler: None,
@@ -1252,6 +1263,56 @@ impl<T> Store<T> {
         callback: impl FnMut(StoreContextMut<T>) -> Result<InterruptAction> + Send + Sync + 'static,
     ) {
         self.inner.interrupt_behavior = Some(Box::new(callback));
+    }
+
+    /// Configures how the stack below a running fiber is made ready for host
+    /// code.
+    ///
+    /// Wasmtime calls `callback(store, sp)` before wasm, or a wasm entry,
+    /// runs at a stack pointer `sp` below the reserve limit of the stack it
+    /// runs on, which starts out above every stack pointer, so the first
+    /// entry on each stack calls it. The callback commits whatever its host
+    /// code needs below `sp` and returns the new limit `L <= sp`: wasm
+    /// calling out to the host at or above `L` then finds the stack committed
+    /// below it. A returned limit above `sp` is a contract violation and ends
+    /// execution with an error naming both values. An error from the
+    /// callback ends execution too, and is what the call returns (an embedder
+    /// answers a stack at its end with
+    /// [`Trap::StackOverflow`](crate::Trap::StackOverflow)).
+    ///
+    /// When wasm calls the callback from a failing stack-limit check, it runs
+    /// before the store's [`Store::interrupt_callback`], so the interrupt
+    /// callback has committed stack under it.
+    ///
+    /// The reserve limit is kept per fiber and swapped with it, and lowers
+    /// only: it stays true for every later entry on the same stack. This
+    /// requires [`Config::stack_limit_interruption`](crate::Config::stack_limit_interruption),
+    /// since the check is the one compiled code already makes against the
+    /// stack limit.
+    ///
+    /// Without a callback, the reserve limit is 0 and nothing changes. A
+    /// fiber that already exists when the callback is installed keeps that 0,
+    /// so install it before the store runs wasm.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the store's engine was not configured with
+    /// [`Config::stack_limit_interruption`](crate::Config::stack_limit_interruption).
+    pub fn stack_reserve_callback(
+        &mut self,
+        callback: impl FnMut(StoreContextMut<T>, usize) -> Result<usize> + Send + Sync + 'static,
+    ) {
+        assert!(
+            self.inner.engine().tunables().stack_limit_interruption,
+            "`Store::stack_reserve_callback` requires `Config::stack_limit_interruption`"
+        );
+        self.inner.stack_reserve_behavior = Some(Box::new(callback));
+        #[cfg(feature = "async")]
+        {
+            self.inner.inner.stack_reserve_enabled = true;
+        }
+        // Not published: the next wasm entry publishes it.
+        self.inner.vm_store_context().arm_reserve_stack_limit();
     }
 
     /// Tests whether there is a pending exception.
@@ -2221,6 +2282,12 @@ at https://bytecodealliance.org/security.
         self.pkey.is_some()
     }
 
+    /// Whether a stack-reserve callback is installed.
+    #[cfg(feature = "async")]
+    pub(crate) fn stack_reserve_enabled(&self) -> bool {
+        self.stack_reserve_enabled
+    }
+
     pub(crate) fn executor(&mut self) -> ExecutorRef<'_> {
         match &mut self.executor {
             Executor::Interpreter(i) => ExecutorRef::Interpreter(i.as_interpreter_ref()),
@@ -2498,6 +2565,28 @@ unsafe impl<T> VMStore for StoreInner<T> {
         // Put back the original behavior which was replaced by `take`.
         self.interrupt_behavior = behavior;
         action
+    }
+
+    fn stack_reserve_reached(&mut self, sp: usize) -> Result<usize> {
+        // Temporarily take the configured behavior to avoid mutably borrowing
+        // multiple times.
+        let mut behavior = self.stack_reserve_behavior.take();
+        let limit = match &mut behavior {
+            Some(callback) => callback((&mut *self).as_context_mut(), sp),
+            None => unreachable!(
+                "the reserve limit is nonzero only while a stack-reserve callback is installed"
+            ),
+        };
+
+        // Put back the original behavior which was replaced by `take`.
+        self.stack_reserve_behavior = behavior;
+        let limit = limit?;
+        crate::ensure!(
+            limit <= sp,
+            "the stack-reserve callback returned the limit {limit:#x}, above the \
+             stack pointer {sp:#x} it was called for"
+        );
+        Ok(limit)
     }
 
     #[cfg(feature = "debug")]

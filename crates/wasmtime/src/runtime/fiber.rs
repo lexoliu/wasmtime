@@ -760,6 +760,12 @@ struct FiberResumeState {
     /// stack limit.
     stack_limit: usize,
 
+    /// The reserve limit of this fiber's stack
+    /// (`VMStoreContext::reserve_stack_limit`), swapped with `stack_limit`:
+    /// each fiber's stack has its own committed floor, so a resumed fiber must
+    /// not inherit another stack's limit.
+    reserve_stack_limit: usize,
+
     /// The executor (e.g. the Pulley interpreter state) belonging to this
     /// fiber.
     ///
@@ -784,11 +790,14 @@ impl FiberResumeState {
             .unwrap_or(ptr::null_mut()..ptr::null_mut());
         let mut executor = self.executor;
         store.swap_executor(&mut executor);
+        let (stack_limit, reserve_stack_limit) =
+            store.enter_stack_limits(self.stack_limit, self.reserve_stack_limit);
         PriorFiberResumeState {
             tls,
             mpk,
             executor,
-            stack_limit: store.enter_stack_limit(self.stack_limit),
+            stack_limit,
+            reserve_stack_limit,
             async_guard_range: store.replace_async_guard_range(async_guard_range),
 
             // The current suspend/future_cx are always null upon resumption, so
@@ -805,19 +814,21 @@ impl FiberResumeState {
 }
 
 impl StoreOpaque {
-    /// Helper function to swap in the stack limit of a fiber being resumed.
+    /// Helper function to swap in the stack limits of a fiber being resumed.
     ///
-    /// This goes through `VMStoreContext::enter_stack_limit`, so a pending
-    /// stack-limit interruption survives the switch and is delivered on
-    /// whichever stack, and processor, next runs this store's wasm.
-    fn enter_stack_limit(&mut self, stack_limit: usize) -> usize {
-        self.vm_store_context().enter_stack_limit(stack_limit)
+    /// This goes through `VMStoreContext::enter_fiber_stack_limits`, so a
+    /// pending stack-limit interruption survives the switch and is delivered
+    /// on whichever stack, and processor, next runs this store's wasm.
+    fn enter_stack_limits(&mut self, stack_limit: usize, reserve: usize) -> (usize, usize) {
+        self.vm_store_context()
+            .enter_fiber_stack_limits(stack_limit, reserve)
     }
 
-    /// Helper function to restore the stack limit a suspending fiber's
-    /// resumer had, through `VMStoreContext::leave_stack_limit`.
-    fn leave_stack_limit(&mut self, stack_limit: usize) -> usize {
-        self.vm_store_context().leave_stack_limit(stack_limit)
+    /// Helper function to restore the stack limits a suspending fiber's
+    /// resumer had, through `VMStoreContext::leave_fiber_stack_limits`.
+    fn leave_stack_limits(&mut self, stack_limit: usize, reserve: usize) -> (usize, usize) {
+        self.vm_store_context()
+            .leave_fiber_stack_limits(stack_limit, reserve)
     }
 
     /// Helper function to swap the `async_guard_range` field in the `VMStoreContext`
@@ -848,6 +859,7 @@ struct PriorFiberResumeState {
     tls: crate::runtime::vm::PreviousAsyncWasmCallState,
     mpk: Option<ProtectionMask>,
     stack_limit: usize,
+    reserve_stack_limit: usize,
     async_guard_range: Range<*mut u8>,
     current_suspend: Option<NonNull<WasmtimeSuspend>>,
     current_future_cx: Option<NonNull<Context<'static>>>,
@@ -873,11 +885,14 @@ impl PriorFiberResumeState {
         let mut executor = self.executor;
         store.swap_executor(&mut executor);
 
+        let (stack_limit, reserve_stack_limit) =
+            store.leave_stack_limits(self.stack_limit, self.reserve_stack_limit);
         FiberResumeState {
             tls,
             mpk,
             executor,
-            stack_limit: store.leave_stack_limit(self.stack_limit),
+            stack_limit,
+            reserve_stack_limit,
         }
     }
 }
@@ -1008,6 +1023,7 @@ where
     let id = opaque.id();
     let stack = opaque.allocate_fiber_stack()?;
     let track_pkey_context_switch = opaque.has_pkey();
+    let stack_reserve_enabled = opaque.stack_reserve_enabled();
     let store = &raw mut *store;
     let fiber = Fiber::new(stack, move |result: WasmtimeResume, suspend| {
         let future_cx = match result {
@@ -1077,6 +1093,9 @@ where
                     None
                 },
                 stack_limit: usize::MAX,
+                // A fresh stack has no committed reserve: with a callback
+                // its first wasm entry must call it.
+                reserve_stack_limit: if stack_reserve_enabled { usize::MAX } else { 0 },
                 executor,
             }
             .into(),

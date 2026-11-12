@@ -847,6 +847,79 @@ impl VMStoreContext {
     pub(crate) fn leave_stack_limit(&self, limit: usize) -> usize {
         // SAFETY: see `real_stack_limit`.
         let previous = unsafe { mem::replace(&mut *self.real_stack_limit.get(), limit) };
+        self.republish_after_leave();
+        previous
+    }
+
+    /// The stack pointer below which the embedder's stack-reserve callback
+    /// must run before wasm or a wasm entry goes on, or 0 without a callback.
+    ///
+    /// The word compiled code reads is `max(real_stack_limit,
+    /// reserve_stack_limit)`, so a stack pointer between the two fails the
+    /// compiled check and reaches the `stack_limit_interrupt` builtin.
+    ///
+    /// Concurrency: like `real_stack_limit`, this is read and written only
+    /// by the thread that runs this store, never by an interrupt handle, so
+    /// it needs no synchronization of its own. It reaches compiled code only
+    /// through `publish_stack_limit`, which stores it into the published word
+    /// before loading `interrupt_pending`, exactly as it does the real limit,
+    /// so the Dekker argument there covers it unchanged.
+    pub(crate) fn reserve_stack_limit(&self) -> usize {
+        // SAFETY: see above.
+        unsafe { *self.reserve_stack_limit.get() }
+    }
+
+    /// Raises the reserve limit to `usize::MAX` without publishing it, for a
+    /// store that just gained a stack-reserve callback: its stack has no
+    /// committed reserve yet, so the next wasm entry must call the callback.
+    /// The word compiled code reads follows at the next publish, which every
+    /// wasm entry makes.
+    pub(crate) fn arm_reserve_stack_limit(&self) {
+        // SAFETY: see `reserve_stack_limit`.
+        unsafe { *self.reserve_stack_limit.get() = usize::MAX };
+    }
+
+    /// Sets the reserve limit of the fiber (or the thread's own stack) that
+    /// is running, and publishes it to compiled code.
+    pub(crate) fn set_reserve_stack_limit(&self, limit: usize) {
+        // SAFETY: see `reserve_stack_limit`.
+        unsafe { *self.reserve_stack_limit.get() = limit };
+        self.publish_stack_limit();
+    }
+
+    /// [`VMStoreContext::enter_stack_limit`] for a fiber being resumed, which
+    /// swaps the fiber's reserve limit in with its real limit. Returns the
+    /// previous `(real, reserve)` pair.
+    pub(crate) fn enter_fiber_stack_limits(&self, real: usize, reserve: usize) -> (usize, usize) {
+        // SAFETY: see `real_stack_limit` and `reserve_stack_limit`.
+        let previous = unsafe {
+            (
+                mem::replace(&mut *self.real_stack_limit.get(), real),
+                mem::replace(&mut *self.reserve_stack_limit.get(), reserve),
+            )
+        };
+        self.publish_stack_limit();
+        previous
+    }
+
+    /// [`VMStoreContext::leave_stack_limit`] for a fiber suspending, which
+    /// swaps the resumer's reserve limit back in with its real limit. Returns
+    /// the `(real, reserve)` pair it replaces.
+    pub(crate) fn leave_fiber_stack_limits(&self, real: usize, reserve: usize) -> (usize, usize) {
+        // SAFETY: see `real_stack_limit` and `reserve_stack_limit`.
+        let previous = unsafe {
+            (
+                mem::replace(&mut *self.real_stack_limit.get(), real),
+                mem::replace(&mut *self.reserve_stack_limit.get(), reserve),
+            )
+        };
+        self.republish_after_leave();
+        previous
+    }
+
+    /// Publishes after this store stopped running wasm on the current thread;
+    /// see [`VMStoreContext::leave_stack_limit`].
+    fn republish_after_leave(&self) {
         if self.per_processor_stack_limit {
             // A requester that loads null from here on only sets the flag,
             // which this store's next publish observes.
@@ -861,7 +934,6 @@ impl VMStoreContext {
         } else {
             self.publish_stack_limit();
         }
-        previous
     }
 
     /// The word compiled code reads this store's limit from while it runs
@@ -879,8 +951,8 @@ impl VMStoreContext {
         unsafe { AtomicUsize::from_ptr(word) }
     }
 
-    /// Writes the real limit into the word compiled code reads (`stack_limit`
-    /// or the executing processor's word), then re-raises the sentinel if an
+    /// Writes `max(real limit, reserve limit)` into the word compiled code
+    /// reads (`stack_limit` or the executing processor's word), then re-raises the sentinel if an
     /// interruption is pending.
     ///
     /// With a per-processor limit the word is recorded in
@@ -905,7 +977,10 @@ impl VMStoreContext {
     /// value of the other's location, which is exactly the lost interrupt.
     fn publish_stack_limit(&self) {
         let word = self.published_stack_limit();
-        word.store(self.real_stack_limit(), Ordering::SeqCst);
+        word.store(
+            self.real_stack_limit().max(self.reserve_stack_limit()),
+            Ordering::SeqCst,
+        );
         if self.interrupt_pending.load(Ordering::SeqCst) {
             word.store(Self::INTERRUPT_SENTINEL, Ordering::SeqCst);
         }
@@ -1004,6 +1079,7 @@ impl Default for VMStoreContext {
             component_context: UnsafeCell::new([0; NUM_COMPONENT_CONTEXT_SLOTS]),
             current_thread: UnsafeCell::new(VMLazyThread::none()),
             real_stack_limit: UnsafeCell::new(usize::MAX),
+            reserve_stack_limit: UnsafeCell::new(0),
             interrupt_pending: AtomicBool::new(false),
             per_processor_stack_limit: false,
             processor_stack_limit: AtomicPtr::new(ptr::null_mut()),

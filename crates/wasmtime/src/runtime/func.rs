@@ -1470,6 +1470,24 @@ pub(crate) fn invoke_wasm_and_catch_traps<T>(
     // stack-allocated `previous_runtime_state`.
     let mut previous_runtime_state = EntryStoreContext::enter_wasm(store, &mut initial_stack_csi);
 
+    // Host code runs below this entry and wasm below that, so a stack pointer
+    // below the reserve limit asks the embedder to commit the stack under it
+    // first. This covers a nested entry on a fiber too, which keeps its limit
+    // but not necessarily a committed reserve under the host frames between
+    // the two entries. With no callback the reserve limit is 0.
+    #[cfg(has_host_compiler_backend)]
+    {
+        let sp = crate::runtime::vm::get_stack_pointer();
+        let vm_store_context = store.0.vm_store_context();
+        if sp < vm_store_context.reserve_stack_limit() {
+            match crate::runtime::vm::VMStore::stack_reserve_reached(&mut *store.0, sp) {
+                Ok(limit) => store.0.vm_store_context().set_reserve_stack_limit(limit),
+                // `previous_runtime_state` implicitly dropped here
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     if let Err(trap) = store.0.call_hook(CallHook::CallingWasm) {
         // `previous_runtime_state` implicitly dropped here
         return Err(trap);

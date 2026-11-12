@@ -826,13 +826,24 @@ fn stack_limit_interrupt(
     _instance: InstanceId,
     sp: *mut u8,
 ) -> Result<()> {
+    let sp = sp.addr();
+
+    // A stack pointer between the real limit and the reserve limit asks the
+    // embedder to commit the stack below it. This comes before the interrupt
+    // callback, which is host code too and needs that stack committed.
+    let ctx = store.vm_store_context();
+    if sp >= ctx.real_stack_limit() && sp < ctx.reserve_stack_limit() {
+        let limit = store.stack_reserve_reached(sp)?;
+        store.vm_store_context().set_reserve_stack_limit(limit);
+    }
+
     deliver_interrupt(store)?;
 
     // Whether or not an interruption was handled, a stack pointer below the
     // real limit is a genuine overflow and traps exactly as the ordinary
     // check would. The limit is read after the callback, since a yield may
     // have resumed this guest with its own fiber's limit restored.
-    if sp.addr() < store.vm_store_context().real_stack_limit() {
+    if sp < store.vm_store_context().real_stack_limit() {
         return Err(Trap::StackOverflow.into());
     }
     Ok(())
