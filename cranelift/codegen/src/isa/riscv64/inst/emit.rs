@@ -199,7 +199,8 @@ impl Inst {
             | Inst::Popcnt { .. }
             | Inst::Cltz { .. }
             | Inst::Brev8 { .. }
-            | Inst::StackProbeLoop { .. } => None,
+            | Inst::StackProbeLoop { .. }
+            | Inst::StackLimitCall { .. } => None,
 
             // VecSetState does not expect any vstate, rather it updates it.
             Inst::VecSetState { .. } => None,
@@ -2568,6 +2569,76 @@ impl Inst {
                 .emit(sink, emit_info, state);
                 Inst::gen_jump(loop_start).emit(sink, emit_info, state);
                 sink.bind_label(label_done, &mut state.ctrl_plane);
+            }
+            &Inst::StackLimitCall {
+                limit,
+                target,
+                vmctx,
+                save_a0,
+                save_a1,
+                ref call,
+            } => {
+                // `t3` and `t4` are caller-saved and no argument register of
+                // any calling convention, and the prologue has not saved
+                // anything yet, so no value of the function is in them; the
+                // `preserve_all` callee returns them as they are.
+                let save0 = Writable::from_reg(x_reg(28));
+                let save1 = Writable::from_reg(x_reg(29));
+                let mv = |rd: Writable<Reg>, rm: Reg| Inst::Mov { rd, rm, ty: I64 };
+
+                // Nothing to do when the frame stays above the limit:
+                //
+                //         bgeu target, limit, .done
+                let done = sink.get_label();
+                Inst::CondBr {
+                    taken: CondBrTarget::Label(done),
+                    not_taken: CondBrTarget::Fallthrough,
+                    kind: IntegerCompare {
+                        kind: IntCC::UnsignedGreaterThanOrEqual,
+                        rs1: target,
+                        rs2: limit,
+                    },
+                }
+                .emit(sink, emit_info, state);
+
+                // The callee takes `(vmctx, target)` in `a0` and `a1`, and
+                // keeps every other register. Move what the function still
+                // needs out of the way of those two, call, and move it back.
+                // `vmctx` is read before `a1` is written, since it may be in
+                // `a1` itself.
+                if save_a0 {
+                    mv(save0, a0()).emit(sink, emit_info, state);
+                }
+                if save_a1 {
+                    mv(save1, a1()).emit(sink, emit_info, state);
+                }
+                if vmctx != a0() {
+                    mv(writable_a0(), vmctx).emit(sink, emit_info, state);
+                }
+                mv(writable_a1(), target).emit(sink, emit_info, state);
+
+                Inst::Call { info: call.clone() }.emit(sink, emit_info, state);
+
+                // The call wrote `ra`. The frame record holds the value it
+                // had on entry, and a `return_call` that grows the incoming
+                // argument area rewrites the record from the live register
+                // after this check, so it must be the entry value again.
+                Inst::gen_load(
+                    writable_link_reg(),
+                    AMode::RegOffset(fp_reg(), 8),
+                    I64,
+                    MemFlagsData::trusted(),
+                )
+                .emit(sink, emit_info, state);
+
+                if save_a0 {
+                    mv(writable_a0(), save0.to_reg()).emit(sink, emit_info, state);
+                }
+                if save_a1 {
+                    mv(writable_a1(), save1.to_reg()).emit(sink, emit_info, state);
+                }
+
+                sink.bind_label(done, &mut state.ctrl_plane);
             }
             &Inst::VecAluRRRImm5 {
                 op,

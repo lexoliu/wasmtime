@@ -1,8 +1,7 @@
-; Only the x64 and aarch64 backends emit the resumable stack check so far, so
-; each of the others refuses a function that declares one rather than
+; Only the x64, aarch64 and riscv64 backends emit the resumable stack check so
+; far, so each of the others refuses a function that declares one rather than
 ; compiling it without the check.
 test compile expect-fail
-target riscv64
 target s390x
 target pulley64
 

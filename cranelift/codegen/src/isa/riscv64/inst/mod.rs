@@ -565,6 +565,8 @@ fn riscv64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             // gen_prologue is called at emit stage.
             // no need let reg alloc know.
         }
+        // Emitted after register allocation, with real registers only.
+        Inst::StackLimitCall { .. } => {}
         Inst::VecAluRRRR {
             op,
             vd,
@@ -990,6 +992,23 @@ impl Inst {
                 let tmp = format_reg(tmp.to_reg());
                 format!(
                     "inline_stack_probe##guard_size={guard_size} probe_count={probe_count} tmp={tmp}"
+                )
+            }
+            &Inst::StackLimitCall {
+                limit,
+                target,
+                vmctx,
+                save_a0,
+                save_a1,
+                ref call,
+            } => {
+                let limit = format_reg(limit);
+                let target = format_reg(target);
+                let vmctx = format_reg(vmctx);
+                format!(
+                    "stack_limit_call {target},{limit}##vmctx={vmctx} save_a0={save_a0} \
+                     save_a1={save_a1} {:?}",
+                    call.dest
                 )
             }
             &Inst::AtomicStore { src, ty, p } => {

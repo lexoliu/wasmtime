@@ -2225,6 +2225,71 @@ fn test_riscv64_binemit() {
         0xf2168553,
     ));
 
+    // The resumable stack check of a large frame, one entry for each choice
+    // of registers kept around the call. The conditional branch skips the
+    // call, the `ra` reload and the restores; the `auipc` and `jalr` carry a
+    // relocation, so their immediates are zero.
+    insns.push(TestUnit::new(
+        Inst::StackLimitCall {
+            limit: spilltmp_reg2(),
+            target: spilltmp_reg(),
+            vmctx: a2(),
+            save_a0: false,
+            save_a1: false,
+            call: Box::new(CallInfo::empty(
+                ExternalName::testcase("test0"),
+                CallConv::PreserveAll,
+            )),
+        },
+        "stack_limit_call t6,t5##vmctx=a2 save_a0=false save_a1=false TestCase(%test0)",
+        "63FCEF011305060093850F0097000000E780000083308400",
+    ));
+    insns.push(TestUnit::new(
+        Inst::StackLimitCall {
+            limit: spilltmp_reg2(),
+            target: spilltmp_reg(),
+            vmctx: a0(),
+            save_a0: false,
+            save_a1: true,
+            call: Box::new(CallInfo::empty(
+                ExternalName::testcase("test0"),
+                CallConv::PreserveAll,
+            )),
+        },
+        "stack_limit_call t6,t5##vmctx=a0 save_a0=false save_a1=true TestCase(%test0)",
+        "63FEEF01938E050093850F0097000000E78000008330840093850E00",
+    ));
+    insns.push(TestUnit::new(
+        Inst::StackLimitCall {
+            limit: spilltmp_reg2(),
+            target: spilltmp_reg(),
+            vmctx: a2(),
+            save_a0: true,
+            save_a1: false,
+            call: Box::new(CallInfo::empty(
+                ExternalName::testcase("test0"),
+                CallConv::PreserveAll,
+            )),
+        },
+        "stack_limit_call t6,t5##vmctx=a2 save_a0=true save_a1=false TestCase(%test0)",
+        "63F0EF03130E05001305060093850F0097000000E78000008330840013050E00",
+    ));
+    insns.push(TestUnit::new(
+        Inst::StackLimitCall {
+            limit: spilltmp_reg(),
+            target: spilltmp_reg2(),
+            vmctx: a1(),
+            save_a0: true,
+            save_a1: true,
+            call: Box::new(CallInfo::empty(
+                ExternalName::testcase("test0"),
+                CallConv::PreserveAll,
+            )),
+        },
+        "stack_limit_call t5,t6##vmctx=a1 save_a0=true save_a1=true TestCase(%test0)",
+        "6374FF03130E0500938E05001385050093050F0097000000E78000008330840013050E0093850E00",
+    ));
+
     let (flags, isa_flags) = make_test_flags();
     let emit_info = EmitInfo::new(flags, isa_flags);
 
@@ -2318,6 +2383,20 @@ fn riscv64_worst_case_instruction_size() {
                 t0: writable_a0(),
             }),
     );
+
+    // Both registers kept and `vmctx` elsewhere: every move uncompressed, the
+    // longest sequence of the instruction.
+    candidates.push(Inst::StackLimitCall {
+        limit: spilltmp_reg2(),
+        target: spilltmp_reg(),
+        vmctx: a2(),
+        save_a0: true,
+        save_a1: true,
+        call: Box::new(CallInfo::empty(
+            ExternalName::testcase("test0"),
+            CallConv::PreserveAll,
+        )),
+    });
 
     // Return Call Indirect and BrTable are the largest instructions possible. However they
     // emit their own island, so we don't account them here.

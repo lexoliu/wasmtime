@@ -283,6 +283,101 @@ impl ABIMachineSpec for Riscv64MachineDeps {
         insts
     }
 
+    const HAS_RESUMABLE_STACK_CHECK: bool = true;
+
+    fn gen_resumable_stack_check(
+        _call_conv: isa::CallConv,
+        frame_size: u32,
+        limit: ResumableLimit,
+        vmctx: Reg,
+        incoming_arg_regs: &[Reg],
+        callee: &ExternalName,
+    ) -> SmallInstVec<Inst> {
+        // The prologue's two scratch registers: `t6` is also
+        // `get_stacklimit_reg`, where a limit loaded through a global value
+        // is, and neither carries an argument in any calling convention or is
+        // allocatable, so no value of the function is in them. `t4` takes the
+        // saturation mask and, in the pseudo-instruction, a kept `a1`; it is
+        // dead by then.
+        let spill = writable_spilltmp_reg();
+        let tmp2 = writable_spilltmp_reg2();
+        let mask = Writable::from_reg(x_reg(29));
+        let mut insts = SmallVec::new();
+
+        // The limit's register, and the other scratch for the target, which
+        // must not overwrite it.
+        let (limit, target) = match limit {
+            ResumableLimit::Reg(reg) => {
+                debug_assert!(reg != tmp2.to_reg());
+                (reg, if reg == spill.to_reg() { tmp2 } else { spill })
+            }
+            ResumableLimit::ProcessorLocal(offset) => {
+                // The word the body's check reads: one `ld` off `tp`.
+                insts.push(Inst::gen_load(
+                    tmp2,
+                    AMode::RegOffset(x_reg(4), i64::from(offset)),
+                    I64,
+                    MemFlagsData::trusted(),
+                ));
+                (tmp2.to_reg(), spill)
+            }
+        };
+
+        // The target `sp - frame_size`, or zero when that borrows: the limit
+        // is `usize::MAX` while an interrupt is pending, so a wrapped target
+        // must not pass the compare. The subtraction wrapped exactly when its
+        // result is above `sp`.
+        if let Some(imm12) = Imm12::maybe_from_i64(-i64::from(frame_size)) {
+            insts.push(Inst::AluRRImm12 {
+                alu_op: AluOPRRI::Addi,
+                rd: target,
+                rs: stack_reg(),
+                imm12,
+            });
+        } else {
+            insts.extend(Inst::load_constant_u32(target, u64::from(frame_size)));
+            insts.push(Inst::AluRRR {
+                alu_op: AluOPRRR::Sub,
+                rd: target,
+                rs1: stack_reg(),
+                rs2: target.to_reg(),
+            });
+        }
+        insts.push(Inst::AluRRR {
+            alu_op: AluOPRRR::SltU,
+            rd: mask,
+            rs1: stack_reg(),
+            rs2: target.to_reg(),
+        });
+        insts.push(Inst::AluRRImm12 {
+            alu_op: AluOPRRI::Addi,
+            rd: mask,
+            rs: mask.to_reg(),
+            imm12: Imm12::from_i16(-1),
+        });
+        insts.push(Inst::AluRRR {
+            alu_op: AluOPRRR::And,
+            rd: target,
+            rs1: target.to_reg(),
+            rs2: mask.to_reg(),
+        });
+
+        // `callee` takes `(vmctx, target)` in `a0` and `a1`. A register that
+        // holds an incoming argument is saved around the call; `a0` already
+        // holding `vmctx` is passed as it is and comes back unchanged.
+        let save_a0 = incoming_arg_regs.contains(&a0()) && vmctx != a0();
+        let save_a1 = incoming_arg_regs.contains(&a1());
+        insts.push(Inst::StackLimitCall {
+            limit,
+            target: target.to_reg(),
+            vmctx,
+            save_a0,
+            save_a1,
+            call: Box::new(CallInfo::empty(callee.clone(), CallConv::PreserveAll)),
+        });
+        insts
+    }
+
     fn gen_get_stack_addr(mem: StackAMode, into_reg: Writable<Reg>) -> Inst {
         Inst::LoadAddr {
             rd: into_reg,
