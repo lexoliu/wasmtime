@@ -308,6 +308,7 @@ impl Metadata<'_> {
             mmu_interruption,
             stack_limit_interruption,
             stack_limit_location,
+            stack_limit_large_frame,
             memory_may_move,
             guard_before_linear_memory,
             table_lazy_init,
@@ -394,6 +395,10 @@ impl Metadata<'_> {
             "stack-limit interruption",
         )?;
         Self::check_stack_limit_location(stack_limit_location, other.stack_limit_location)?;
+        Self::check_stack_limit_large_frame(
+            stack_limit_large_frame,
+            other.stack_limit_large_frame,
+        )?;
         Self::check_bool(memory_may_move, other.memory_may_move, "memory may move")?;
         Self::check_bool(
             guard_before_linear_memory,
@@ -525,6 +530,22 @@ impl Metadata<'_> {
         bail!(
             "module was compiled to read the stack limit {module} however the host keeps it {host}"
         )
+    }
+
+    fn check_stack_limit_large_frame(module: Option<u32>, host: Option<u32>) -> Result<()> {
+        if module == host {
+            return Ok(());
+        }
+
+        let desc = |threshold| match threshold {
+            Some(bytes) => format!("a prologue stack check for frames above {bytes} bytes"),
+            None => "no prologue stack check for large frames".to_string(),
+        };
+
+        let module = desc(module);
+        let host = desc(host);
+
+        bail!("module was compiled with {module} however the host is configured with {host}")
     }
 
     fn check_inlining(
