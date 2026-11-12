@@ -1090,6 +1090,8 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             // dataflow happens without a move.
             collector.reg_fixed_def(next_load_ptr, regs::xreg(10));
         }
+        // Emitted after register allocation, with real registers only.
+        Inst::StackLimitCall { .. } => {}
     }
 }
 
@@ -3200,6 +3202,23 @@ impl Inst {
                 let next_load_ptr = pretty_print_reg(next_load_ptr.to_reg());
                 format!(
                     "{next_load_ptr} = interrupt_poll load_ptr={load_ptr}, context={context}, scratch={dst} #trap={trap_code}"
+                )
+            }
+            &Inst::StackLimitCall {
+                limit,
+                target,
+                vmctx,
+                save_x0,
+                save_x1,
+                ref call,
+            } => {
+                let limit = pretty_print_reg(limit);
+                let target = pretty_print_reg(target);
+                let vmctx = pretty_print_reg(vmctx);
+                format!(
+                    "stack_limit_call {target}, {limit}, vmctx={vmctx}, save_x0={save_x0}, \
+                     save_x1={save_x1}, {:?}",
+                    call.dest
                 )
             }
         }

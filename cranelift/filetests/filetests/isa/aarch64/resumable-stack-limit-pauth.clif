@@ -1,0 +1,68 @@
+test compile precise-output
+set enable_probestack=true
+set probestack_strategy=inline
+set preserve_frame_pointers=true
+set unwind_info=false
+target aarch64 sign_return_address
+
+;; With pointer authentication the frame record holds the signed link
+;; register, since `paciaz` runs before the `stp`. The check reloads it after
+;; the call, so the epilogue's `autiaz` sees the value `paciaz` signed.
+
+function %sign_return_address(i64 vmctx, i64) -> i64 tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   paciaz
+;   stp fp, lr, [sp, #-16]!
+;   mov fp, sp
+;   mrs x17, tpidr_el1 ; ldr x17, [x17, #16]
+;   subs x16, sp, #8192
+;   csel x16, x16, xzr, hs
+;   stack_limit_call x16, x17, vmctx=x2, save_x0=false, save_x1=false, TestCase(%stack_limit_interrupt)
+;   sub sp, sp, #4096
+;   str wzr, [sp]
+;   sub sp, sp, #4096
+;   str wzr, [sp]
+;   add sp, sp, #8192
+;   sub sp, sp, #8192
+; block0:
+;   mov x2, x3
+;   add sp, sp, #8192
+;   ldp fp, lr, [sp], #16
+;   autiaz ; ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   paciaz
+;   stp x29, x30, [sp, #-0x10]!
+;   mov x29, sp
+;   mrs x17, tpidr_el1
+;   ldur x17, [x17, #0x10]
+;   subs x16, sp, #2, lsl #12
+;   csel x16, x16, xzr, hs
+;   cmp x16, x17
+;   b.hs #0x34
+;   mov x0, x2
+;   mov x1, x16
+;   bl #0x2c ; reloc_external Call %stack_limit_interrupt 0
+;   ldur x30, [x29, #8]
+;   sub sp, sp, #1, lsl #12
+;   stur wzr, [sp]
+;   sub sp, sp, #1, lsl #12
+;   stur wzr, [sp]
+;   add sp, sp, #2, lsl #12
+;   sub sp, sp, #2, lsl #12
+; block1: ; offset 0x4c
+;   mov x2, x3
+;   add sp, sp, #2, lsl #12
+;   ldp x29, x30, [sp], #0x10
+;   autiaz
+;   ret
+
