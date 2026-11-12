@@ -6,6 +6,7 @@
 use crate::HashMap;
 use crate::entity::{PrimaryMap, SecondaryMap};
 use crate::ir::DebugTags;
+use crate::ir::immediates::Offset32;
 use crate::ir::{
     self, Block, DataFlowGraph, DynamicStackSlot, DynamicStackSlotData, DynamicStackSlots,
     DynamicType, ExtFuncData, FuncRef, GlobalValue, GlobalValueData, Inst, JumpTable,
@@ -207,6 +208,81 @@ pub struct FunctionStencil {
     /// ensure that a trap happens if the stack pointer goes below the
     /// threshold specified here.
     pub stack_limit: Option<ir::GlobalValue>,
+
+    /// An optional resumable stack check for this function's prologue.
+    ///
+    /// See [`ResumableStackLimit`]. A backend that does not implement the
+    /// check refuses a function that carries this field.
+    pub resumable_stack_limit: Option<ResumableStackLimit>,
+}
+
+/// A stack check that the prologue of a function with a large frame performs
+/// and that, instead of trapping, calls a function which may resume.
+///
+/// `stack_limit` is a trap-only check. A function whose frame must be checked
+/// before it is allocated, but whose embedder must be able to suspend, deliver
+/// an interrupt or fail the stack growth in a controlled way at that point,
+/// declares a `ResumableStackLimit` instead.
+///
+/// When the frame size `F` the backend computes for the function (its fixed
+/// frame, clobber saves, outgoing arguments and any frame setup area) is
+/// greater than `min_frame`, the backend emits the check after the frame
+/// record is set up and before any stack probe or clobber save: it computes
+/// the target `sp - F`, saturating at zero, and compares it against the limit.
+/// When the target is below the limit, it calls `callee` with the
+/// function's `vmctx` argument and that target, then continues with the
+/// function's incoming arguments and link register preserved. A frame of
+/// `min_frame` bytes or fewer is not checked by this mechanism.
+///
+/// A function that sets this field must have a `vmctx` parameter, a calling
+/// convention other than `preserve_all`, `winch` or `probestack`, a colocated
+/// `callee` with the signature `preserve_all (ptr, ptr)` returning nothing,
+/// and, for `ResumableStackLimitSource::Global`, a global value of pointer
+/// type. The verifier checks each of these. A backend without support for the
+/// check refuses the function with a `CodegenError::Unsupported`, so the field
+/// is never silently ignored.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
+pub struct ResumableStackLimit {
+    /// Where the prologue reads the limit it compares the target against.
+    pub limit: ResumableStackLimitSource,
+
+    /// The largest frame, in bytes, that is not checked by the prologue.
+    pub min_frame: u32,
+
+    /// The function called when the target is below the limit.
+    pub callee: FuncRef,
+}
+
+/// The location of the limit a [`ResumableStackLimit`] compares against.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
+pub enum ResumableStackLimitSource {
+    /// A global value evaluated in the prologue, like `stack_limit`. It must
+    /// have the pointer type.
+    Global(GlobalValue),
+
+    /// The word at this byte offset in the executing processor's local
+    /// storage, as read by the `load_processor_local` instruction.
+    ProcessorLocal(Offset32),
+}
+
+impl fmt::Display for ResumableStackLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.limit {
+            ResumableStackLimitSource::Global(gv) => write!(f, "{gv}")?,
+            ResumableStackLimitSource::ProcessorLocal(offset) => {
+                write!(f, "processor_local {}", i32::from(offset))?
+            }
+        }
+        write!(f, ", {}, {}", self.min_frame, self.callee)
+    }
 }
 
 impl FunctionStencil {
@@ -220,6 +296,7 @@ impl FunctionStencil {
         self.srclocs.clear();
         self.debug_tags.clear();
         self.stack_limit = None;
+        self.resumable_stack_limit = None;
     }
 
     /// Create a `ReplaceBuilder` that will replace `inst` with a new
@@ -419,6 +496,7 @@ impl Function {
                 layout: Layout::new(),
                 srclocs: SecondaryMap::new(),
                 stack_limit: None,
+                resumable_stack_limit: None,
                 debug_tags: DebugTags::default(),
             },
             params: FunctionParameters::new(),

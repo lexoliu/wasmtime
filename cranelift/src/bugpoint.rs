@@ -10,7 +10,7 @@ use cranelift_codegen::flowgraph::ControlFlowGraph;
 use cranelift_codegen::ir::types::{F32, F64, I64, I128};
 use cranelift_codegen::ir::{
     self, Block, FuncRef, Function, GlobalValueData, Inst, InstBuilder, InstructionData,
-    StackSlots, TrapCode,
+    ResumableStackLimitSource, StackSlots, TrapCode,
 };
 use cranelift_codegen::isa::TargetIsa;
 use cranelift_entity::PrimaryMap;
@@ -453,10 +453,19 @@ impl Mutator for RemoveUnusedEntities {
                 }
 
                 let mut ext_funcs = PrimaryMap::new();
+                let resumable_callee = func.resumable_stack_limit.map(|limit| limit.callee);
 
                 for (func_ref, ext_func_data) in func.dfg.ext_funcs.clone().into_iter() {
-                    if let Some(func_ref_usage) = ext_func_usage_map.get(&func_ref) {
+                    let used_by_limit = resumable_callee == Some(func_ref);
+                    if used_by_limit || ext_func_usage_map.contains_key(&func_ref) {
                         let new_func_ref = ext_funcs.push(ext_func_data.clone());
+                        if used_by_limit {
+                            func.resumable_stack_limit.as_mut().unwrap().callee = new_func_ref;
+                        }
+                        let func_ref_usage = ext_func_usage_map
+                            .get(&func_ref)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default();
                         for &inst in func_ref_usage {
                             match func.dfg.insts[inst] {
                                 // Keep in sync with the above match.
@@ -602,9 +611,32 @@ impl Mutator for RemoveUnusedEntities {
 
                 let mut global_values = PrimaryMap::new();
 
+                // The preamble's stack limits name global values too.
+                let resumable_gv = match func.resumable_stack_limit.map(|limit| limit.limit) {
+                    Some(ResumableStackLimitSource::Global(gv)) => Some(gv),
+                    _ => None,
+                };
+                let stack_limit_gv = func.stack_limit;
+
                 for (global_value, global_value_data) in func.global_values.clone().into_iter() {
-                    if let Some(global_value_usage) = global_value_usage_map.get(&global_value) {
+                    let used_by_resumable = resumable_gv == Some(global_value);
+                    let used_by_stack_limit = stack_limit_gv == Some(global_value);
+                    if used_by_resumable
+                        || used_by_stack_limit
+                        || global_value_usage_map.contains_key(&global_value)
+                    {
                         let new_global_value = global_values.push(global_value_data.clone());
+                        if used_by_resumable {
+                            func.resumable_stack_limit.as_mut().unwrap().limit =
+                                ResumableStackLimitSource::Global(new_global_value);
+                        }
+                        if used_by_stack_limit {
+                            func.stack_limit = Some(new_global_value);
+                        }
+                        let global_value_usage = global_value_usage_map
+                            .get(&global_value)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default();
                         for &inst in global_value_usage {
                             match &mut func.dfg.insts[inst] {
                                 // Keep in sync with the above match.

@@ -1,0 +1,86 @@
+test verifier
+target x86_64
+
+function %accepted_global(i64 vmctx) tail {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned gv0+8
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = gv1, 16384, fn0
+block0(v0: i64):
+    return
+}
+
+function %accepted_processor_local(i64 vmctx) tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 16384, fn0
+block0(v0: i64):
+    return
+}
+
+function %callee_not_preserve_all(i64 vmctx) tail {
+    sig0 = (i64, i64) system_v
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 16384, fn0 ; error: must have the signature `preserve_all (ptr, ptr)`
+block0(v0: i64):
+    return
+}
+
+function %callee_with_results(i64 vmctx) tail {
+    sig0 = (i64, i64) -> i64 preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 16384, fn0 ; error: must have the signature `preserve_all (ptr, ptr)`
+block0(v0: i64):
+    return
+}
+
+function %callee_wrong_params(i64 vmctx) tail {
+    sig0 = (i64, i32) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 16384, fn0 ; error: must have the signature `preserve_all (ptr, ptr)`
+block0(v0: i64):
+    return
+}
+
+function %callee_not_colocated(i64 vmctx) tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 16384, fn0 ; error: must be colocated
+block0(v0: i64):
+    return
+}
+
+function %no_vmctx(i64) tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 16384, fn0 ; error: must have a vmctx parameter
+block0(v0: i64):
+    return
+}
+
+function %own_preserve_all(i64 vmctx) preserve_all {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 16384, fn0 ; error: cannot use the preserve_all calling convention
+block0(v0: i64):
+    return
+}
+
+function %own_winch(i64 vmctx) winch {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 16384, fn0 ; error: cannot use the winch calling convention
+block0(v0: i64):
+    return
+}
+
+function %global_not_pointer(i64 vmctx) tail {
+    gv0 = vmctx
+    gv1 = load.i32 notrap aligned gv0+8
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = gv1, 16384, fn0 ; error: has type i32, which is not the pointer type i64
+block0(v0: i64):
+    return
+}

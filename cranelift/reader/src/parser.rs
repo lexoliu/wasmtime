@@ -21,7 +21,8 @@ use cranelift_codegen::ir::{
     AbiParam, ArgumentExtension, ArgumentPurpose, Block, BlockArg, Constant, ConstantData,
     DynamicStackSlot, DynamicStackSlotData, DynamicTypeData, ExtFuncData, ExternalName, FuncRef,
     Function, GlobalValue, GlobalValueData, JumpTableData, MemFlagsData, MemFlagsSet, Opcode,
-    SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, UserFuncName, Value, types,
+    ResumableStackLimit, ResumableStackLimitSource, SigRef, Signature, StackSlot, StackSlotData,
+    StackSlotKind, UserFuncName, Value, types,
 };
 use cranelift_codegen::isa::{self, CallConv};
 use cranelift_codegen::packed_option::ReservedValue;
@@ -230,6 +231,10 @@ struct Context {
 
     /// Aliases to resolve once value definitions are known.
     aliases: Vec<Value>,
+
+    /// Where the resumable stack limit was declared, to report references it
+    /// makes to undeclared entities once the whole preamble is known.
+    resumable_stack_limit_loc: Option<Location>,
 }
 
 impl Context {
@@ -238,6 +243,7 @@ impl Context {
             function: f,
             map: SourceMap::new(),
             aliases: Vec::new(),
+            resumable_stack_limit_loc: None,
         }
     }
 
@@ -411,6 +417,35 @@ impl Context {
             return err!(loc, "stack limit defined twice");
         }
         self.function.stack_limit = Some(limit);
+        Ok(())
+    }
+
+    // Configure the resumable stack limit of the current function.
+    fn add_resumable_stack_limit(
+        &mut self,
+        limit: ResumableStackLimit,
+        loc: Location,
+    ) -> ParseResult<()> {
+        if self.function.resumable_stack_limit.is_some() {
+            return err!(loc, "resumable stack limit defined twice");
+        }
+        self.function.resumable_stack_limit = Some(limit);
+        self.resumable_stack_limit_loc = Some(loc);
+        Ok(())
+    }
+
+    // Once the whole preamble is known, check that the resumable stack limit
+    // refers to declared entities.
+    fn check_resumable_stack_limit(&self) -> ParseResult<()> {
+        if let (Some(limit), Some(loc)) = (
+            self.function.resumable_stack_limit,
+            self.resumable_stack_limit_loc,
+        ) {
+            if let ResumableStackLimitSource::Global(gv) = limit.limit {
+                self.check_gv(gv, loc)?;
+            }
+            self.check_fn(limit.callee, loc)?;
+        }
         Ok(())
     }
 
@@ -1519,8 +1554,14 @@ impl<'a> Parser<'a> {
                     self.parse_alias_region_decl()
                         .and_then(|(ar, dat)| ctx.add_alias_region(ar, dat, self.loc))
                 }
+                Some(Token::Identifier("resumable_stack_limit")) => {
+                    self.start_gathering_comments();
+                    let loc = self.loc;
+                    self.parse_resumable_stack_limit_decl()
+                        .and_then(|limit| ctx.add_resumable_stack_limit(limit, loc))
+                }
                 // More to come..
-                _ => return Ok(()),
+                _ => return ctx.check_resumable_stack_limit(),
             }?;
         }
     }
@@ -1995,6 +2036,60 @@ impl<'a> Parser<'a> {
         self.claim_gathered_comments(AnyEntity::StackLimit);
 
         Ok(limit)
+    }
+
+    // Parse a resumable stack limit decl
+    //
+    // resumable-stack-limit-decl ::= * "resumable_stack_limit" "=" source "," Uimm32 "," FuncRef(fn)
+    // source                     ::= GlobalValue(gv)
+    //                              | "processor_local" Imm32
+    fn parse_resumable_stack_limit_decl(&mut self) -> ParseResult<ResumableStackLimit> {
+        match self.token() {
+            Some(Token::Identifier("resumable_stack_limit")) => {
+                self.consume();
+            }
+            _ => return err!(self.loc, "expected identifier: resumable_stack_limit"),
+        }
+        self.match_token(Token::Equal, "expected '=' in resumable stack limit decl")?;
+        let limit = match self.token() {
+            Some(Token::GlobalValue(..)) => ResumableStackLimitSource::Global(
+                self.match_gv("invalid global value number for resumable stack limit")?,
+            ),
+            Some(Token::Identifier("processor_local")) => {
+                self.consume();
+                ResumableStackLimitSource::ProcessorLocal(Offset32::new(self.match_imm32(
+                    "expected processor-local byte offset in resumable stack limit decl",
+                )?))
+            }
+            _ => {
+                return err!(
+                    self.loc,
+                    "expected global value or 'processor_local' in resumable stack limit decl"
+                );
+            }
+        };
+        self.match_token(
+            Token::Comma,
+            "expected ',' after the limit in resumable stack limit decl",
+        )?;
+        let min_frame = self
+            .match_uimm32("expected minimum frame size in resumable stack limit decl")?
+            .into();
+        self.match_token(
+            Token::Comma,
+            "expected ',' after the minimum frame size in resumable stack limit decl",
+        )?;
+        let callee = self.match_fn("expected function in resumable stack limit decl")?;
+
+        // Collect any trailing comments.
+        self.token();
+        self.claim_gathered_comments(AnyEntity::ResumableStackLimit);
+
+        Ok(ResumableStackLimit {
+            limit,
+            min_frame,
+            callee,
+        })
     }
 
     // Parse a function body, add contents to `ctx`.
