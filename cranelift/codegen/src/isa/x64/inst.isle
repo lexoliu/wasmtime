@@ -49,6 +49,21 @@
        ;; check against that word needs no register.
        (CmpSpProcessorLocal (offset i32))
 
+       ;; The resumable stack check of a large frame, emitted in the prologue
+       ;; after regalloc (see `gen_resumable_stack_check`). It compares
+       ;; `target`, the lowest address the frame would reach, with the limit
+       ;; and, when `target` is below it, calls `call` with `vmctx` in `rdi`
+       ;; and `target` in `rsi`, keeping `rdi` (in `rax`) and `rsi` (in `r10`)
+       ;; when `save_rdi` and `save_rsi` say they hold a value the function
+       ;; still needs. Every other register survives the `preserve_all`
+       ;; callee. `rax` and `r10` are written only in these cases.
+       (StackLimitCall (limit StackLimitSource)
+                       (target Reg)
+                       (vmctx Reg)
+                       (save_rdi bool)
+                       (save_rsi bool)
+                       (call BoxCallInfo))
+
        ;; =========================================
        ;; Conditional moves.
 
@@ -330,6 +345,14 @@
        (External (inst AssemblerInst))))
 
 (type AssemblerInst extern (enum))
+
+;; Where the limit of a `StackLimitCall` is.
+(type StackLimitSource
+      (enum
+        ;; A register that holds the limit.
+        (Reg (reg Reg))
+        ;; The 64-bit word at `offset` in the processor's local block.
+        (ProcessorLocal (offset i32))))
 
 (type OperandSize extern
       (enum Size8

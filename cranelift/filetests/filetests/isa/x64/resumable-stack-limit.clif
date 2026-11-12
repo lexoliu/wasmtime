@@ -1,0 +1,502 @@
+test compile precise-output
+set enable_probestack=true
+set probestack_strategy=inline
+set preserve_frame_pointers=true
+set enable_multi_ret_implicit_sret=true
+target x86_64
+
+;; A frame of exactly `min_frame` bytes is not checked: the prologue is the
+;; one of the same function without the declaration.
+
+function %at_min_frame(i64 vmctx, i64) -> i64 tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 1024
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x400, %rsp
+; block0:
+;   movq %rsi, %rax
+;   addq $0x400, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x400, %rsp
+; block1: ; offset 0xb
+;   movq %rsi, %rax
+;   addq $0x400, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %at_min_frame_plain(i64 vmctx, i64) -> i64 tail {
+    ss0 = explicit_slot 1024
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x400, %rsp
+; block0:
+;   movq %rsi, %rax
+;   addq $0x400, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x400, %rsp
+; block1: ; offset 0xb
+;   movq %rsi, %rax
+;   addq $0x400, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; A frame above `min_frame` with the limit in the processor's local block:
+;; the check follows the frame record and precedes the probes. `rsi` holds
+;; an incoming argument, so it is saved and restored.
+
+function %processor_local(i64 vmctx, i64) -> i64 tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x2000, %r11
+;   cmovbq %rax, %r11
+;   stack_limit_call %r11, %fs:16, vmctx=%rdi, save_rdi=false, save_rsi=true, TestCase(%stack_limit_interrupt)
+;   subq $0x1000, %rsp
+;   movl $0x0, (%rsp)
+;   subq $0x1000, %rsp
+;   movl $0x0, (%rsp)
+;   addq $0x2000, %rsp
+;   subq $0x2000, %rsp
+; block0:
+;   movq %rsi, %rax
+;   addq $0x2000, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x2000, %r11
+;   cmovbq %rax, %r11
+;   cmpq %fs:0x10, %r11
+;   jae 0x31
+;   movq %rsi, %r10
+;   movq %r11, %rsi
+;   callq 0x2e ; reloc_external CallPCRel4 %stack_limit_interrupt -4
+;   movq %r10, %rsi
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   addq $0x2000, %rsp
+;   subq $0x2000, %rsp
+; block1: ; offset 0x5b
+;   movq %rsi, %rax
+;   addq $0x2000, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; The same with the limit reached through global values, like
+;; `stack_limit`: `vmctx`'s store context, then its limit word.
+
+function %global_chain(i64 vmctx, i64) -> i64 tail {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned readonly gv0+8
+    gv2 = load.i64 notrap aligned gv1+24
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = gv2, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   movq 8(%rdi), %r10
+;   movq 0x18(%r10), %r10
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x2000, %r11
+;   cmovbq %rax, %r11
+;   stack_limit_call %r11, %r10, vmctx=%rdi, save_rdi=false, save_rsi=true, TestCase(%stack_limit_interrupt)
+;   subq $0x1000, %rsp
+;   movl $0x0, (%rsp)
+;   subq $0x1000, %rsp
+;   movl $0x0, (%rsp)
+;   addq $0x2000, %rsp
+;   subq $0x2000, %rsp
+; block0:
+;   movq %rsi, %rax
+;   addq $0x2000, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   movq 8(%rdi), %r10
+;   movq 0x18(%r10), %r10
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x2000, %r11
+;   cmovbq %rax, %r11
+;   cmpq %r10, %r11
+;   jae 0x33
+;   movq %rsi, %r10
+;   movq %r11, %rsi
+;   callq 0x30 ; reloc_external CallPCRel4 %stack_limit_interrupt -4
+;   movq %r10, %rsi
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   addq $0x2000, %rsp
+;   subq $0x2000, %rsp
+; block1: ; offset 0x5d
+;   movq %rsi, %rax
+;   addq $0x2000, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; A frame above `min_frame` replaces the trapping `stack_limit` check: no
+;; `ud2` island is left.
+
+function %with_stack_limit_over(i64 vmctx, i64) -> i64 tail {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned readonly gv0+8
+    gv2 = load.i64 notrap aligned gv1+24
+    stack_limit = gv2
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x2000, %r11
+;   cmovbq %rax, %r11
+;   stack_limit_call %r11, %fs:16, vmctx=%rdi, save_rdi=false, save_rsi=true, TestCase(%stack_limit_interrupt)
+;   subq $0x1000, %rsp
+;   movl $0x0, (%rsp)
+;   subq $0x1000, %rsp
+;   movl $0x0, (%rsp)
+;   addq $0x2000, %rsp
+;   subq $0x2000, %rsp
+; block0:
+;   movq %rsi, %rax
+;   addq $0x2000, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x2000, %r11
+;   cmovbq %rax, %r11
+;   cmpq %fs:0x10, %r11
+;   jae 0x31
+;   movq %rsi, %r10
+;   movq %r11, %rsi
+;   callq 0x2e ; reloc_external CallPCRel4 %stack_limit_interrupt -4
+;   movq %r10, %rsi
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   addq $0x2000, %rsp
+;   subq $0x2000, %rsp
+; block1: ; offset 0x5b
+;   movq %rsi, %rax
+;   addq $0x2000, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; A frame of at most `min_frame` keeps the trapping `stack_limit` check.
+
+function %with_stack_limit_small(i64 vmctx, i64) -> i64 tail {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned readonly gv0+8
+    gv2 = load.i64 notrap aligned gv1+24
+    stack_limit = gv2
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 512
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   movq 8(%rdi), %r10
+;   movq 0x18(%r10), %r10
+;   addq $0x200, %r10
+;   cmpq %rsp, %r10
+;   jnbe #trap=stk_ovf
+;   subq $0x200, %rsp
+; block0:
+;   movq %rsi, %rax
+;   addq $0x200, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   movq 8(%rdi), %r10
+;   movq 0x18(%r10), %r10
+;   addq $0x200, %r10
+;   cmpq %rsp, %r10
+;   ja 0x32
+;   subq $0x200, %rsp
+; block1: ; offset 0x23
+;   movq %rsi, %rax
+;   addq $0x200, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   ud2 ; trap: stk_ovf
+
+;; Four results do not fit the return registers, so the implicit return-area
+;; pointer takes `rdi` and `vmctx` moves to `rsi`: both are saved.
+
+function %return_area(i64 vmctx) -> i64, i64, i64, i64 system_v {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64):
+    return v0, v0, v0, v0
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x2000, %r11
+;   cmovbq %rax, %r11
+;   stack_limit_call %r11, %fs:16, vmctx=%rsi, save_rdi=true, save_rsi=true, TestCase(%stack_limit_interrupt)
+;   subq $0x1000, %rsp
+;   movl $0x0, (%rsp)
+;   subq $0x1000, %rsp
+;   movl $0x0, (%rsp)
+;   addq $0x2000, %rsp
+;   subq $0x2000, %rsp
+; block0:
+;   movq %rsi, (%rdi)
+;   movq %rsi, 8(%rdi)
+;   movq %rsi, %rdx
+;   movq %rdx, %rax
+;   addq $0x2000, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x2000, %r11
+;   cmovbq %rax, %r11
+;   cmpq %fs:0x10, %r11
+;   jae 0x3a
+;   movq %rdi, %rax
+;   movq %rsi, %r10
+;   movq %rsi, %rdi
+;   movq %r11, %rsi
+;   callq 0x34 ; reloc_external CallPCRel4 %stack_limit_interrupt -4
+;   movq %rax, %rdi
+;   movq %r10, %rsi
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   addq $0x2000, %rsp
+;   subq $0x2000, %rsp
+; block1: ; offset 0x64
+;   movq %rsi, (%rdi)
+;   movq %rsi, 8(%rdi)
+;   movq %rsi, %rdx
+;   movq %rdx, %rax
+;   addq $0x2000, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; `windows_fastcall` passes `vmctx` in `rcx` and makes `rdi` and `rsi`
+;; callee-saved, and their saves come after the check: both are kept.
+
+function %fastcall(i64 vmctx, i64) -> i64 windows_fastcall {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 8192
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x2000, %r11
+;   cmovbq %rax, %r11
+;   stack_limit_call %r11, %fs:16, vmctx=%rcx, save_rdi=true, save_rsi=true, TestCase(%stack_limit_interrupt)
+;   subq $0x1000, %rsp
+;   movl $0x0, (%rsp)
+;   subq $0x1000, %rsp
+;   movl $0x0, (%rsp)
+;   addq $0x2000, %rsp
+;   subq $0x2000, %rsp
+; block0:
+;   movq %rdx, %rax
+;   addq $0x2000, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x2000, %r11
+;   cmovbq %rax, %r11
+;   cmpq %fs:0x10, %r11
+;   jae 0x3a
+;   movq %rdi, %rax
+;   movq %rsi, %r10
+;   movq %rcx, %rdi
+;   movq %r11, %rsi
+;   callq 0x34 ; reloc_external CallPCRel4 %stack_limit_interrupt -4
+;   movq %rax, %rdi
+;   movq %r10, %rsi
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   addq $0x2000, %rsp
+;   subq $0x2000, %rsp
+; block1: ; offset 0x64
+;   movq %rdx, %rax
+;   addq $0x2000, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; A frame above 32 KiB: the frame size is an `imm32` of the `sub`, and the
+;; probes follow the check.
+
+function %above_32k(i64 vmctx, i64) -> i64 tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 1024, fn0
+    ss0 = explicit_slot 40000
+block0(v0: i64, v1: i64):
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x9c40, %r11
+;   cmovbq %rax, %r11
+;   stack_limit_call %r11, %fs:16, vmctx=%rdi, save_rdi=false, save_rsi=true, TestCase(%stack_limit_interrupt)
+;   stack_probe_loop %r11, frame_size=40000, guard_size=4096
+;   subq $0x9c40, %rsp
+; block0:
+;   movq %rsi, %rax
+;   addq $0x9c40, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   xorl %eax, %eax
+;   movq %rsp, %r11
+;   subq $0x9c40, %r11
+;   cmovbq %rax, %r11
+;   cmpq %fs:0x10, %r11
+;   jae 0x31
+;   movq %rsi, %r10
+;   movq %r11, %rsi
+;   callq 0x2e ; reloc_external CallPCRel4 %stack_limit_interrupt -4
+;   movq %r10, %rsi
+;   movq %rsp, %r11
+;   subq $0xa000, %r11
+;   subq $0x1000, %rsp
+;   movl $0, (%rsp)
+;   cmpq %rsp, %r11
+;   jne 0x3b
+;   addq $0xa000, %rsp
+;   subq $0x9c40, %rsp
+; block1: ; offset 0x60
+;   movq %rsi, %rax
+;   addq $0x9c40, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+

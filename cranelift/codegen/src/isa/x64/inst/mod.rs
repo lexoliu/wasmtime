@@ -37,6 +37,7 @@ use args::*;
 // `Inst` is defined inside ISLE as `MInst`. We publicly re-export it here.
 pub use super::lower::isle::generated_code::AtomicRmwSeqOp;
 pub use super::lower::isle::generated_code::MInst as Inst;
+pub use super::lower::isle::generated_code::StackLimitSource;
 
 /// Out-of-line data for return-calls, to keep the size of `Inst` down.
 #[derive(Clone, Debug)]
@@ -94,6 +95,7 @@ impl Inst {
             | Inst::MovToPReg { .. }
             | Inst::LoadProcessorLocal { .. }
             | Inst::CmpSpProcessorLocal { .. }
+            | Inst::StackLimitCall { .. }
             | Inst::StackProbeLoop { .. }
             | Inst::Args { .. }
             | Inst::Rets { .. }
@@ -545,6 +547,28 @@ impl PrettyPrint for Inst {
                 format!("{op} %fs:{offset}, %rsp")
             }
 
+            Inst::StackLimitCall {
+                limit,
+                target,
+                vmctx,
+                save_rdi,
+                save_rsi,
+                call,
+            } => {
+                let limit = match limit {
+                    StackLimitSource::Reg { reg } => pretty_print_reg(*reg, 8),
+                    StackLimitSource::ProcessorLocal { offset } => format!("%fs:{offset}"),
+                };
+                let target = pretty_print_reg(*target, 8);
+                let vmctx = pretty_print_reg(*vmctx, 8);
+                let op = ljustify("stack_limit_call".to_string());
+                format!(
+                    "{op} {target}, {limit}, vmctx={vmctx}, save_rdi={save_rdi}, \
+                     save_rsi={save_rsi}, {:?}",
+                    call.dest
+                )
+            }
+
             Inst::MovToPReg { src, dst } => {
                 let src = pretty_print_reg(src.to_reg(), 8);
                 let dst: Reg = (*dst).into();
@@ -924,6 +948,9 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
         }
         Inst::LoadProcessorLocal { dst, .. } => collector.reg_def(dst),
         Inst::CmpSpProcessorLocal { .. } => {}
+        // Emitted after register allocation, with real registers only, like
+        // `StackProbeLoop`.
+        Inst::StackLimitCall { .. } => {}
         Inst::MovToPReg { dst, src } => {
             debug_assert!(src.to_reg().is_virtual());
             collector.reg_use(src);

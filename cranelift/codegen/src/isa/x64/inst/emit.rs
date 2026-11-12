@@ -37,6 +37,22 @@ fn one_way_jmp(sink: &mut MachBuffer<Inst>, cc: CC, label: MachLabel) {
     debug_assert_eq!(sink.cur_offset(), cond_disp_off + 4);
 }
 
+/// Emits the instruction with one-byte opcode `opcode` (`0x8b` for `mov`,
+/// `0x3b` for `cmp`) that takes a 64-bit register `reg` and reads a 64-bit
+/// word from the processor's local block at `offset`: `op reg, qword ptr
+/// fs:[offset]`. It is the FS segment override, a REX.W prefix, the opcode
+/// and a SIB byte with neither base nor index, so the address is the 32-bit
+/// displacement alone.
+fn emit_processor_local_rm(sink: &mut MachBuffer<Inst>, opcode: u8, reg: Reg, offset: i32) {
+    let enc = reg.to_real_reg().unwrap().hw_enc();
+    sink.put1(0x64);
+    sink.put1(0x48 | ((enc >> 3) << 2));
+    sink.put1(opcode);
+    sink.put1(((enc & 7) << 3) | 0b100);
+    sink.put1(0x25);
+    sink.put4(offset.cast_unsigned());
+}
+
 /// Like `one_way_jmp` above emitting a conditional jump, but also using
 /// `MachBuffer::add_cond_branch`.
 fn cond_jmp(sink: &mut MachBuffer<Inst>, cc: CC, label: MachLabel) {
@@ -297,28 +313,76 @@ pub(crate) fn emit(
         }
 
         Inst::LoadProcessorLocal { dst, offset } => {
-            // mov dst, qword ptr fs:[offset]: the FS segment override, a
-            // REX.W `mov r64, r/m64` and a SIB byte with neither base nor
-            // index, so the address is the 32-bit displacement alone.
+            // mov dst, qword ptr fs:[offset]
             let dst = dst.to_reg().to_reg();
-            let enc = dst.to_real_reg().unwrap().hw_enc();
-            sink.put1(0x64);
-            sink.put1(0x48 | ((enc >> 3) << 2));
-            sink.put1(0x8b);
-            sink.put1(((enc & 7) << 3) | 0b100);
-            sink.put1(0x25);
-            sink.put4(offset.cast_unsigned());
+            emit_processor_local_rm(sink, 0x8b, dst, *offset);
         }
 
         Inst::CmpSpProcessorLocal { offset } => {
-            // cmp rsp, qword ptr fs:[offset]: `cmp r64, r/m64` with `rsp`
-            // in the ModRM reg field and the same base-less SIB address.
-            sink.put1(0x64);
-            sink.put1(0x48);
-            sink.put1(0x3b);
-            sink.put1((regs::rsp().to_real_reg().unwrap().hw_enc() << 3) | 0b100);
-            sink.put1(0x25);
-            sink.put4(offset.cast_unsigned());
+            // cmp rsp, qword ptr fs:[offset]
+            emit_processor_local_rm(sink, 0x3b, regs::rsp(), *offset);
+        }
+
+        Inst::StackLimitCall {
+            limit,
+            target,
+            vmctx,
+            save_rdi,
+            save_rsi,
+            call,
+        } => {
+            let target = *target;
+            let vmctx = *vmctx;
+            let rdi = Writable::from_reg(regs::rdi());
+            let rsi = Writable::from_reg(regs::rsi());
+            let rax = Writable::from_reg(regs::rax());
+            let r10 = Writable::from_reg(regs::r10());
+
+            // Nothing to do when the frame stays above the limit:
+            //
+            //         cmp  target, limit
+            //         jae  .done
+            match limit {
+                StackLimitSource::Reg { reg } => {
+                    asm::inst::cmpq_rm::new(Gpr::unwrap_new(target), Gpr::unwrap_new(*reg))
+                        .emit(sink, info, state);
+                }
+                StackLimitSource::ProcessorLocal { offset } => {
+                    // cmp target, qword ptr fs:[offset]
+                    emit_processor_local_rm(sink, 0x3b, target, *offset);
+                }
+            }
+            let done = sink.get_label();
+            one_way_jmp(sink, CC::NB, done);
+
+            // The callee takes `(vmctx, target)` in `rdi` and `rsi`, and
+            // keeps every other register. Move what the function still needs
+            // out of the way of those two, call, and move it back.
+            //
+            // `rax` and `r10` are neither arguments nor callee-saved, so no
+            // value of the function is in them yet, and the callee returns
+            // them as they are.
+            if *save_rdi {
+                Inst::gen_move(rax, regs::rdi(), types::I64).emit(sink, info, state);
+            }
+            if *save_rsi {
+                Inst::gen_move(r10, regs::rsi(), types::I64).emit(sink, info, state);
+            }
+            if vmctx != regs::rdi() {
+                Inst::gen_move(rdi, vmctx, types::I64).emit(sink, info, state);
+            }
+            Inst::gen_move(rsi, target, types::I64).emit(sink, info, state);
+
+            Inst::CallKnown { info: call.clone() }.emit(sink, info, state);
+
+            if *save_rdi {
+                Inst::gen_move(rdi, rax.to_reg(), types::I64).emit(sink, info, state);
+            }
+            if *save_rsi {
+                Inst::gen_move(rsi, r10.to_reg(), types::I64).emit(sink, info, state);
+            }
+
+            sink.bind_label(done, state.ctrl_plane_mut());
         }
 
         Inst::MovToPReg { src, dst } => {

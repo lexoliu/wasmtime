@@ -454,6 +454,58 @@ pub trait ABIMachineSpec {
     /// stack grows downward).
     fn gen_stack_lower_bound_trap(limit_reg: Reg) -> SmallInstVec<Self::I>;
 
+    /// Whether this backend implements [`Self::gen_resumable_stack_check`].
+    /// A function that declares `resumable_stack_limit` is refused with
+    /// `CodegenError::Unsupported` by a backend that does not, so the check
+    /// is never silently dropped.
+    const HAS_RESUMABLE_STACK_CHECK: bool = false;
+
+    /// Generate the prologue check of `ir::ResumableStackLimit` for a frame
+    /// of `frame_size` bytes, to be placed after the frame setup and before
+    /// any stack probe or clobber save.
+    ///
+    /// The sequence computes the target `sp - frame_size`, saturated at
+    /// zero, and compares it with `limit` (unsigned). When the target is
+    /// below the limit it calls `callee` with `vmctx` and the target as its
+    /// two arguments, then falls through with every register that held an
+    /// incoming argument, and the link register, as they were. When it is
+    /// not, it falls through at once. `callee` is a `preserve_all` function
+    /// of two pointer arguments.
+    ///
+    /// - `limit` is where the limit is: a register already holding it (loaded
+    ///   by the caller, which may be the register `get_stacklimit_reg`
+    ///   returns, or `vmctx` itself), or an offset in the executing
+    ///   processor's local storage, which the sequence reads itself.
+    /// - `vmctx` is the register holding the function's `vmctx` argument.
+    /// - `incoming_arg_regs` is every register that carries an incoming
+    ///   argument at this point, the implicit return-area pointer included,
+    ///   `vmctx` among them. Only the sequence's own registers and those the
+    ///   call convention of `callee` uses for its arguments may be written,
+    ///   and the former must satisfy the contract of `gen_add_imm`: they are
+    ///   caller-saved, not arguments of any function using `call_conv`, and
+    ///   not the register of `limit` when it is a register.
+    ///
+    /// Like the rest of the prologue this runs after register allocation, so
+    /// no spill may happen in it and nothing is live across it.
+    fn gen_resumable_stack_check(
+        call_conv: isa::CallConv,
+        frame_size: u32,
+        limit: ResumableLimit,
+        vmctx: Reg,
+        incoming_arg_regs: &[Reg],
+        callee: &ir::ExternalName,
+    ) -> SmallInstVec<Self::I> {
+        let _ = (
+            call_conv,
+            frame_size,
+            limit,
+            vmctx,
+            incoming_arg_regs,
+            callee,
+        );
+        unimplemented!("`HAS_RESUMABLE_STACK_CHECK` is false for this backend")
+    }
+
     /// Generate an instruction to compute an address of a stack slot (FP- or
     /// SP-based offset).
     fn gen_get_stack_addr(mem: StackAMode, into_reg: Writable<Reg>) -> Self::I;
@@ -1140,6 +1192,35 @@ impl FrameLayout {
     }
 }
 
+/// Where the limit of a resumable prologue stack check is found when
+/// [`ABIMachineSpec::gen_resumable_stack_check`] runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResumableLimit {
+    /// The limit is in this register, loaded by instructions that precede the
+    /// check.
+    Reg(Reg),
+    /// The limit is the word at this byte offset in the executing
+    /// processor's local storage.
+    ProcessorLocal(i32),
+}
+
+/// What `Callee` keeps of an `ir::ResumableStackLimit` to emit its check.
+struct ResumableStackCheck<M: ABIMachineSpec> {
+    /// Frames of at most this many bytes are not checked.
+    min_frame: u32,
+    /// Instructions that leave the limit in the register of `limit`, for a
+    /// `Global` source, evaluated like `stack_limit`'s.
+    limit_load: SmallInstVec<M::I>,
+    /// Where the limit is once `limit_load` has run.
+    limit: ResumableLimit,
+    /// The register of the function's `vmctx` argument.
+    vmctx: Reg,
+    /// The registers that carry incoming arguments.
+    incoming_arg_regs: SmallVec<[Reg; 8]>,
+    /// The function called when the frame would cross the limit.
+    callee: ir::ExternalName,
+}
+
 /// ABI object for a function body.
 pub struct Callee<M: ABIMachineSpec> {
     /// CLIF-level signature, possibly normalized.
@@ -1186,6 +1267,11 @@ pub struct Callee<M: ABIMachineSpec> {
     /// manually register-allocated and carefully only use caller-saved
     /// registers and keep nothing live after this sequence of instructions.
     stack_limit: Option<(Reg, SmallInstVec<M::I>)>,
+
+    /// The resumable stack check of this function, if it declares one. It
+    /// takes the place of `stack_limit`'s check for frames above its
+    /// `min_frame`.
+    resumable_stack_check: Option<ResumableStackCheck<M>>,
 
     _mach: PhantomData<M>,
 }
@@ -1302,14 +1388,18 @@ impl<M: ABIMachineSpec> Callee<M> {
             dynamic_type_sizes.insert(ty, size);
         }
 
-        // No backend emits the prologue check that
-        // `Function::resumable_stack_limit` declares yet. Compiling without it
-        // would silently drop a check the caller relies on, so refuse.
-        if f.resumable_stack_limit.is_some() {
-            return Err(CodegenError::Unsupported(
-                "`resumable_stack_limit` is not supported by this backend".into(),
-            ));
-        }
+        // Resolve the resumable stack check, if the function declares one. A
+        // backend that does not emit it refuses the function: compiling
+        // without it would silently drop a check the caller relies on.
+        let resumable_stack_check = match f.resumable_stack_limit {
+            None => None,
+            Some(_) if !M::HAS_RESUMABLE_STACK_CHECK => {
+                return Err(CodegenError::Unsupported(
+                    "`resumable_stack_limit` is not supported by this backend".into(),
+                ));
+            }
+            Some(check) => Some(gen_resumable_stack_check::<M>(f, sigs, sig, check)),
+        };
 
         // Figure out what instructions, if any, will be needed to check the
         // stack limit. This can either be specified as a special-purpose
@@ -1338,6 +1428,7 @@ impl<M: ABIMachineSpec> Callee<M> {
             flags,
             isa_flags: isa_flags.clone(),
             stack_limit,
+            resumable_stack_check,
             _mach: PhantomData,
         })
     }
@@ -1433,6 +1524,49 @@ fn gen_stack_limit<M: ABIMachineSpec>(
     let mut insts = smallvec![];
     let reg = generate_gv::<M>(f, sigs, sig, gv, &mut insts);
     return (reg, insts);
+}
+
+/// Resolves an `ir::ResumableStackLimit` for the backend: the callee's name,
+/// the registers that carry arguments, and the instructions that load a
+/// `Global` limit, evaluated like `stack_limit`'s.
+fn gen_resumable_stack_check<M: ABIMachineSpec>(
+    f: &ir::Function,
+    sigs: &SigSet,
+    sig: Sig,
+    check: ir::ResumableStackLimit,
+) -> ResumableStackCheck<M> {
+    let mut limit_load = smallvec![];
+    let limit = match check.limit {
+        ir::ResumableStackLimitSource::Global(gv) => {
+            ResumableLimit::Reg(generate_gv::<M>(f, sigs, sig, gv, &mut limit_load))
+        }
+        ir::ResumableStackLimitSource::ProcessorLocal(offset) => {
+            ResumableLimit::ProcessorLocal(offset.into())
+        }
+    };
+    let vmctx = get_special_purpose_param_register(f, sigs, sig, ir::ArgumentPurpose::VMContext)
+        .expect("`resumable_stack_limit` needs a vmcontext parameter in a register");
+    let mut incoming_arg_regs: SmallVec<[Reg; 8]> = smallvec![];
+    for arg in sigs.args(sig) {
+        let slots: &[ABIArgSlot] = match arg {
+            ABIArg::Slots { slots, .. } => slots,
+            ABIArg::ImplicitPtrArg { pointer, .. } => core::slice::from_ref(pointer),
+            ABIArg::StructArg { .. } => &[],
+        };
+        for slot in slots {
+            if let ABIArgSlot::Reg { reg, .. } = slot {
+                incoming_arg_regs.push((*reg).into());
+            }
+        }
+    }
+    ResumableStackCheck {
+        min_frame: check.min_frame,
+        limit_load,
+        limit,
+        vmctx,
+        incoming_arg_regs,
+        callee: f.dfg.ext_funcs[check.callee].name.clone(),
+    }
 }
 
 fn generate_gv<M: ABIMachineSpec>(
@@ -2298,7 +2432,30 @@ impl<M: ABIMachineSpec> Callee<M> {
         // Leaf functions with zero stack don't need a stack check if one's
         // specified, otherwise always insert the stack check.
         if total_stacksize > 0 || frame_layout.function_calls != FunctionCalls::None {
-            if let Some((reg, stack_limit_load)) = &self.stack_limit {
+            // A frame above the resumable check's threshold is checked by it
+            // alone: it replaces the trapping `stack_limit` check, which
+            // would be redundant, and it runs here, after the frame setup,
+            // so the frame record that stack walks follow exists when the
+            // check calls out.
+            let resumable = self
+                .resumable_stack_check
+                .as_ref()
+                .filter(|check| total_stacksize > check.min_frame);
+            if let Some(check) = resumable {
+                assert!(
+                    frame_layout.setup_area_size > 0,
+                    "a resumable stack check runs after the frame record is set up"
+                );
+                insts.extend(check.limit_load.iter().cloned());
+                insts.extend(M::gen_resumable_stack_check(
+                    self.call_conv,
+                    total_stacksize,
+                    check.limit,
+                    check.vmctx,
+                    &check.incoming_arg_regs,
+                    &check.callee,
+                ));
+            } else if let Some((reg, stack_limit_load)) = &self.stack_limit {
                 insts.extend(stack_limit_load.clone());
                 self.insert_stack_check(*reg, total_stacksize, &mut insts);
             }

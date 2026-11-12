@@ -490,6 +490,74 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         ]
     }
 
+    const HAS_RESUMABLE_STACK_CHECK: bool = true;
+
+    fn gen_resumable_stack_check(
+        call_conv: isa::CallConv,
+        frame_size: u32,
+        limit: ResumableLimit,
+        vmctx: Reg,
+        incoming_arg_regs: &[Reg],
+        callee: &ExternalName,
+    ) -> SmallInstVec<Self::I> {
+        // The prologue's fixed scratch registers: all three are caller-saved
+        // and none carries an argument in any calling convention, so no value
+        // of the function is in them, and `preserve_all` returns them as they
+        // are. `r10` is also `get_stacklimit_reg`, where a limit loaded
+        // through a global value is; it is read before anything writes it.
+        let rax = Writable::from_reg(regs::rax());
+        let r11 = Writable::from_reg(regs::r11());
+        match limit {
+            ResumableLimit::Reg(reg) => {
+                debug_assert!(reg != rax.to_reg() && reg != r11.to_reg());
+            }
+            ResumableLimit::ProcessorLocal(_) => {}
+        }
+
+        // `callee` takes `(vmctx, target)` in `rdi` and `rsi`. A register
+        // that holds an incoming argument is saved around the call, and so is
+        // one the caller must preserve (`rdi` and `rsi` are callee-saved in
+        // `windows_fastcall`, whose clobber saves come after this check).
+        // `rdi` already holding `vmctx` is passed as it is and comes back
+        // unchanged; `rsi` always receives the target.
+        let keeps = |reg: Reg| {
+            incoming_arg_regs.contains(&reg) || call_conv == isa::CallConv::WindowsFastcall
+        };
+        let save_rdi = keeps(regs::rdi()) && vmctx != regs::rdi();
+        let save_rsi = keeps(regs::rsi());
+
+        let frame_size = i32::try_from(frame_size)
+            .expect("`frame_size` is too large to fit in a 32-bit immediate");
+        let call = CallInfo::empty(callee.clone(), isa::CallConv::PreserveAll);
+        smallvec![
+            // The target `rsp - frame_size`, or zero when that borrows: the
+            // limit is `usize::MAX` while an interrupt is pending, so a
+            // wrapped target must not pass the compare. `xor` writes the
+            // flags, so it precedes the `sub`.
+            Inst::External {
+                inst: asm::inst::xorl_rm::new(rax, rax.to_reg()).into(),
+            },
+            Inst::gen_move(r11, regs::rsp(), I64),
+            Inst::subq_mi(r11, frame_size),
+            Inst::External {
+                inst: asm::inst::cmovbq_rm::new(r11, rax.to_reg()).into(),
+            },
+            Inst::StackLimitCall {
+                limit: match limit {
+                    ResumableLimit::Reg(reg) => StackLimitSource::Reg { reg },
+                    ResumableLimit::ProcessorLocal(offset) => {
+                        StackLimitSource::ProcessorLocal { offset }
+                    }
+                },
+                target: r11.to_reg(),
+                vmctx,
+                save_rdi,
+                save_rsi,
+                call: Box::new(call),
+            },
+        ]
+    }
+
     fn gen_get_stack_addr(mem: StackAMode, into_reg: Writable<Reg>) -> Self::I {
         let mem: SyntheticAmode = mem.into();
         Inst::External {
