@@ -101,6 +101,11 @@ pub trait FuncWriter {
             self.write_entity_definition(w, func, AnyEntity::StackLimit, &limit)?;
         }
 
+        if let Some(limit) = func.resumable_stack_limit {
+            any = true;
+            self.write_entity_definition(w, func, AnyEntity::ResumableStackLimit, &limit)?;
+        }
+
         Ok(any)
     }
 

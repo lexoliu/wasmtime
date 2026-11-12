@@ -396,6 +396,8 @@ pub enum AnyEntity {
     AliasRegion(AliasRegion),
     /// A function's stack limit
     StackLimit,
+    /// A function's resumable stack limit
+    ResumableStackLimit,
 }
 
 impl fmt::Display for AnyEntity {
@@ -416,6 +418,7 @@ impl fmt::Display for AnyEntity {
             Self::ExceptionTable(r) => r.fmt(f),
             Self::AliasRegion(r) => r.fmt(f),
             Self::StackLimit => write!(f, "stack_limit"),
+            Self::ResumableStackLimit => write!(f, "resumable_stack_limit"),
         }
     }
 }

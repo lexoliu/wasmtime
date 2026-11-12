@@ -1,0 +1,59 @@
+; Parser tests for the resumable stack limit preamble declaration.
+test cat
+
+function %global(i64 vmctx) tail {
+    gv0 = vmctx
+    gv1 = load.i64 notrap aligned gv0+8
+    gv2 = load.i64 notrap aligned gv1
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = gv2, 16384, fn0
+block0(v0: i64):
+    return
+}
+; sameln: function %global(i64 vmctx) tail {
+; nextln:     gv0 = vmctx
+; nextln:     gv1 = load.i64 notrap aligned gv0+8
+; nextln:     gv2 = load.i64 notrap aligned gv1
+; nextln:     sig0 = (i64, i64) preserve_all
+; nextln:     fn0 = colocated %stack_limit_interrupt sig0
+; nextln:     resumable_stack_limit = gv2, 16384, fn0
+; check: block0(v0: i64):
+; nextln:     return
+; nextln: }
+
+function %processor_local(i64 vmctx) tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 16384, fn0
+block0(v0: i64):
+    return
+}
+; sameln: function %processor_local(i64 vmctx) tail {
+; nextln:     sig0 = (i64, i64) preserve_all
+; nextln:     fn0 = colocated %stack_limit_interrupt sig0
+; nextln:     resumable_stack_limit = processor_local 16, 16384, fn0
+; check: block0(v0: i64):
+; nextln:     return
+; nextln: }
+
+; Both declarations may coexist, and the declaration may precede the entities
+; it names.
+function %both(i64 vmctx) tail {
+    resumable_stack_limit = processor_local 0, 1, fn0
+    stack_limit = gv0
+    gv0 = vmctx
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+block0(v0: i64):
+    return
+}
+; sameln: function %both(i64 vmctx) tail {
+; nextln:     gv0 = vmctx
+; nextln:     sig0 = (i64, i64) preserve_all
+; nextln:     fn0 = colocated %stack_limit_interrupt sig0
+; nextln:     stack_limit = gv0
+; nextln:     resumable_stack_limit = processor_local 0, 1, fn0
+; check: block0(v0: i64):
+; nextln:     return
+; nextln: }

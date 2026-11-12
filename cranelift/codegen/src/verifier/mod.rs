@@ -47,6 +47,15 @@
 //! - Detect cycles in global values.
 //! - Detect use of 'vmctx' global value when no corresponding parameter is defined.
 //!
+//! Resumable stack limit
+//!
+//! - The limit's global value and callee must exist.
+//! - The function must have a 'vmctx' parameter and a calling convention other than
+//!   'preserve_all', 'winch' or 'probestack'.
+//! - A global value limit must have the pointer type.
+//! - The callee must be colocated and have the signature `preserve_all (ptr, ptr)`
+//!   with no results.
+//!
 //! Memory types
 //!
 //! - Ensure that struct fields are in offset order.
@@ -414,6 +423,121 @@ impl<'a> Verifier<'a> {
         }
 
         // Invalid global values shouldn't stop us from verifying the rest of the function
+        Ok(())
+    }
+
+    // Check the function's resumable stack limit, if it has one:
+    //  - it names a global value and a function that exist.
+    //  - the function has a 'vmctx' parameter for the check to pass on.
+    //  - the function's own calling convention is not 'preserve_all',
+    //    'winch' or 'probestack'.
+    //  - a global value source has the pointer type.
+    //  - the callee is colocated.
+    //  - the callee is 'preserve_all (ptr, ptr)' and returns nothing.
+    fn verify_resumable_stack_limit(&self, errors: &mut VerifierErrors) -> VerifierStepResult {
+        let Some(limit) = self.func.resumable_stack_limit else {
+            return Ok(());
+        };
+        let entity = AnyEntity::ResumableStackLimit;
+
+        if let ir::ResumableStackLimitSource::Global(gv) = limit.limit {
+            if !self.func.global_values.is_valid(gv) {
+                return errors.fatal((
+                    entity,
+                    format!("resumable stack limit names the undefined global value {gv}"),
+                ));
+            }
+        }
+        if !self.func.dfg.ext_funcs.is_valid(limit.callee) {
+            return errors.fatal((
+                entity,
+                format!(
+                    "resumable stack limit names the undefined function {}",
+                    limit.callee
+                ),
+            ));
+        }
+
+        if self
+            .func
+            .signature
+            .special_param_index(ArgumentPurpose::VMContext)
+            .is_none()
+        {
+            errors.report((
+                entity,
+                "a function with a resumable stack limit must have a vmctx parameter, \
+                 but its signature declares none",
+            ));
+        }
+
+        match self.func.signature.call_conv {
+            CallConv::PreserveAll | CallConv::Winch | CallConv::Probestack => {
+                errors.report((
+                    entity,
+                    format!(
+                        "a function with a resumable stack limit cannot use the {} calling \
+                         convention, which has no prologue check to place it in",
+                        self.func.signature.call_conv
+                    ),
+                ));
+            }
+            _ => {}
+        }
+
+        if let (ir::ResumableStackLimitSource::Global(gv), Some(isa)) = (limit.limit, self.isa) {
+            let gv_type = self.func.global_values[gv].global_type(isa);
+            let pointer_type = isa.pointer_type();
+            if gv_type != pointer_type {
+                errors.report((
+                    entity,
+                    format!(
+                        "resumable stack limit global value {gv} has type {gv_type}, which is \
+                         not the pointer type {pointer_type}"
+                    ),
+                ));
+            }
+        }
+
+        let callee = &self.func.dfg.ext_funcs[limit.callee];
+        if !callee.colocated {
+            errors.report((
+                entity,
+                format!(
+                    "resumable stack limit callee {} must be colocated, since the prologue \
+                     reaches it with a direct call",
+                    limit.callee
+                ),
+            ));
+        }
+        if callee.signature.is_reserved_value() {
+            return errors.fatal((
+                entity,
+                format!(
+                    "resumable stack limit callee {} has no signature",
+                    limit.callee
+                ),
+            ));
+        }
+        let sig = &self.func.dfg.signatures[callee.signature];
+        let pointer_like = |ty: Type| match self.isa {
+            Some(isa) => ty == isa.pointer_type(),
+            None => ty == types::I32 || ty == types::I64,
+        };
+        let expected_shape = sig.call_conv == CallConv::PreserveAll
+            && sig.params.len() == 2
+            && sig.params.iter().all(|p| pointer_like(p.value_type))
+            && sig.returns.is_empty();
+        if !expected_shape {
+            errors.report((
+                entity,
+                format!(
+                    "resumable stack limit callee {} must have the signature \
+                     `preserve_all (ptr, ptr)` with no results, found `{sig}`",
+                    limit.callee
+                ),
+            ));
+        }
         Ok(())
     }
 
@@ -2116,6 +2240,7 @@ impl<'a> Verifier<'a> {
 
     pub fn run(&self, errors: &mut VerifierErrors) -> VerifierStepResult {
         self.verify_global_values(errors)?;
+        self.verify_resumable_stack_limit(errors)?;
         self.verify_alias_regions(errors)?;
         self.typecheck_entry_block_params(errors)?;
         self.check_entry_not_cold(errors)?;

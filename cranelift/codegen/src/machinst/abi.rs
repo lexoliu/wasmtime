@@ -1302,6 +1302,15 @@ impl<M: ABIMachineSpec> Callee<M> {
             dynamic_type_sizes.insert(ty, size);
         }
 
+        // No backend emits the prologue check that
+        // `Function::resumable_stack_limit` declares yet. Compiling without it
+        // would silently drop a check the caller relies on, so refuse.
+        if f.resumable_stack_limit.is_some() {
+            return Err(CodegenError::Unsupported(
+                "`resumable_stack_limit` is not supported by this backend".into(),
+            ));
+        }
+
         // Figure out what instructions, if any, will be needed to check the
         // stack limit. This can either be specified as a special-purpose
         // argument or as a global value which often calculates the stack limit

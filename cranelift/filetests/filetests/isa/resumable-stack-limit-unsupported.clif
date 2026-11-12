@@ -1,0 +1,16 @@
+; No backend emits the resumable stack check yet, so each refuses a function
+; that declares one rather than compiling it without the check.
+test compile expect-fail
+target x86_64
+target aarch64
+target riscv64
+target s390x
+target pulley64
+
+function %f(i64 vmctx) tail {
+    sig0 = (i64, i64) preserve_all
+    fn0 = colocated %stack_limit_interrupt sig0
+    resumable_stack_limit = processor_local 16, 16384, fn0
+block0(v0: i64):
+    return
+}
