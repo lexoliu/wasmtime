@@ -9,8 +9,10 @@ use cranelift_codegen::binemit::CodeOffset;
 use cranelift_codegen::cursor::FuncCursor;
 use cranelift_codegen::inline::InlineCommand;
 use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_codegen::ir::{
-    self, InstBuilder, MemFlagsData, UserExternalName, UserFuncName, Value,
+    self, InstBuilder, MemFlagsData, ResumableStackLimit, ResumableStackLimitSource,
+    UserExternalName, UserFuncName, Value,
 };
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::isa::{
@@ -617,6 +619,44 @@ impl wasmtime_environ::Compiler for Compiler {
             } else {
                 Some(EntryStackCheck::Trap(stack_limit))
             };
+
+            // A frame above the threshold is checked before it is allocated,
+            // which the checks above cannot do: they run after the prologue
+            // has allocated and probed it. The prologue check compares the
+            // frame's lowest address with the published limit word, the one
+            // the body's resumable checks read, never `real_stack_limit`, so
+            // that a pending interruption or a reserve above the real limit
+            // is seen too. It replaces the trap check of a function that has
+            // one, and the body's entry check stays: it is still the point
+            // where a function that calls wasm is interrupted, and the frame
+            // size is not known at translation.
+            if self.tunables.stack_limit_interruption
+                && let Some(min_frame) = self.tunables.stack_limit_large_frame
+            {
+                let limit = match self.tunables.stack_limit_location {
+                    StackLimitLocation::StoreContext => {
+                        let store_ctx = func_env
+                            .alias_regions
+                            .vmctx_store_context_load(&mut context.func);
+                        let published = func_env
+                            .alias_regions
+                            .vmstore_context_stack_limit_load(&mut context.func);
+                        ResumableStackLimitSource::Global(
+                            VmctxLoadChain::new([store_ctx, published].into())
+                                .emit_global(&mut context.func),
+                        )
+                    }
+                    StackLimitLocation::PerProcessor { offset } => {
+                        ResumableStackLimitSource::ProcessorLocal(Offset32::new(offset))
+                    }
+                };
+                let callee = func_env.stack_limit_interrupt_callee(&mut context.func);
+                context.func.resumable_stack_limit = Some(ResumableStackLimit {
+                    limit,
+                    min_frame,
+                    callee,
+                });
+            }
         }
         let mut validator =
             validator.into_validator(mem::take(&mut compiler.cx.validator_allocations));

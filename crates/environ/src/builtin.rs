@@ -56,7 +56,10 @@ macro_rules! foreach_builtin_function {
             new_epoch(vmctx: vmctx) -> u64;
             // Invoked when a stack-limit check fails under stack-limit
             // interruption: delivers a pending interruption, then traps if
-            // `sp` is really below the store's stack limit.
+            // `sp` is really below the store's stack limit. `sp` is the
+            // stack pointer the checking function reaches: its current one
+            // for a check in its body, the lowest address of its frame for
+            // the prologue check of a large frame.
             stack_limit_interrupt(vmctx: vmctx, sp: pointer) -> bool;
             // Invoked before malloc returns.
             #[cfg(feature = "wmemcheck")]

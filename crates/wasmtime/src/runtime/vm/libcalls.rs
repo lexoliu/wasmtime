@@ -821,6 +821,13 @@ fn new_epoch(store: &mut dyn VMStore, _instance: InstanceId) -> Result<NextEpoch
 // Hook for when compiled code's stack-limit check fails under stack-limit
 // interruption: either an interruption was requested (the limit holds the
 // sentinel) or the stack really is exhausted, or both.
+//
+// `sp` is the stack pointer the checking function reaches. A check in a
+// function's body passes its current stack pointer. The prologue check of a
+// function with a frame above `Tunables::stack_limit_large_frame` runs before
+// that frame is allocated and passes the lowest address of the frame, `sp - F`
+// saturated at zero, so a target in the reserve or below the real limit is
+// seen before any byte of the frame is touched.
 fn stack_limit_interrupt(
     store: &mut dyn VMStore,
     _instance: InstanceId,

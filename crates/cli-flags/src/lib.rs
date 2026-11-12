@@ -359,6 +359,10 @@ wasmtime_option_group! {
         /// (the default) or `processor:<offset>`, a word of the executing
         /// processor's local block (a custom platform only).
         pub stack_limit_location: Option<wasmtime::StackLimitLocation>,
+        /// Check the stack in the prologue of every function whose frame is
+        /// larger than this many bytes, before the frame is allocated.
+        /// Requires stack-limit interruption.
+        pub stack_limit_large_frame: Option<u32>,
         /// Maximum stack size, in bytes, that wasm is allowed to consume before a
         /// stack overflow is reported.
         pub max_wasm_stack: Option<usize>,
@@ -1021,6 +1025,9 @@ impl CommonOptions {
         if let Some(location) = self.wasm.stack_limit_location {
             config.stack_limit_location(location);
         }
+        if let Some(threshold) = self.wasm.stack_limit_large_frame {
+            config.stack_limit_large_frame(Some(threshold));
+        }
         if let Some(enable) = self.wasm.stack_limit_interruption {
             config.stack_limit_interruption(enable);
         }
@@ -1499,6 +1506,7 @@ impl CommonOptions {
                 epoch_interruption: Some(engine.get_epoch_interruption()),
                 stack_limit_interruption: Some(engine.get_stack_limit_interruption()),
                 stack_limit_location: Some(engine.get_stack_limit_location()),
+                stack_limit_large_frame: engine.get_stack_limit_large_frame(),
                 fuel: if engine.get_consume_fuel() {
                     Some(1)
                 } else {

@@ -863,6 +863,41 @@ impl Config {
         self
     }
 
+    /// Checks the stack in the prologue of every function whose frame is
+    /// larger than `threshold` bytes, before the frame is allocated.
+    ///
+    /// The checks of [`Config::stack_limit_interruption`] run at a function's
+    /// entry and loop headers, after the prologue has allocated the frame and
+    /// probed it, so a frame much larger than the stack the embedder has
+    /// committed past the limit touches memory it has not committed. With
+    /// `Some(threshold)`, a function whose frame (fixed frame, clobber saves,
+    /// outgoing arguments and frame setup area) exceeds `threshold` bytes
+    /// first compares the lowest address of that frame with the stack limit
+    /// the location of [`Config::stack_limit_location`] names, saturating at
+    /// zero. When it is below the limit, the function calls the same
+    /// resumable builtin as the other checks with that address, so a pending
+    /// interruption is delivered, [`Store::stack_reserve_callback`] runs and
+    /// the stack overflow trap is raised, all before any byte of the frame is
+    /// touched. A function whose frame is at most `threshold` bytes is not
+    /// checked there.
+    ///
+    /// The check is emitted for x86-64, AArch64 and RISC-V 64. A module
+    /// compiled with one threshold is refused by an engine configured with
+    /// another, or with none.
+    ///
+    /// [`Engine::new`](crate::Engine::new) refuses this option without
+    /// `stack_limit_interruption`, on any other target, under the Winch
+    /// compiler, and with a garbage collector other than the null collector
+    /// while GC is supported. The call the prologue makes is not a safepoint
+    /// with a stack map, so it cannot keep a collector that frees or moves
+    /// objects informed of a GC reference an argument register holds.
+    ///
+    /// This option is `None` by default.
+    pub fn stack_limit_large_frame(&mut self, threshold: Option<u32>) -> &mut Self {
+        self.tunables.stack_limit_large_frame = Some(threshold);
+        self
+    }
+
     /// XXX: For internal fuzzing and debugging use only!
     #[doc(hidden)]
     pub fn gc_zeal_alloc_counter(&mut self, counter: Option<NonZeroU32>) -> Result<&mut Self> {
@@ -2986,6 +3021,43 @@ impl Config {
                 bail!(
                     "the per-processor stack limit offset {offset} is not a multiple of the \
                      pointer size"
+                );
+            }
+        }
+
+        if let Some(threshold) = tunables.stack_limit_large_frame {
+            if !tunables.stack_limit_interruption {
+                bail!("`stack_limit_large_frame` requires `stack_limit_interruption`");
+            }
+            let target = self.compiler_target();
+            match target.architecture {
+                target_lexicon::Architecture::X86_64
+                | target_lexicon::Architecture::Aarch64(_)
+                | target_lexicon::Architecture::Riscv64(_) => {}
+                _ => bail!(
+                    "`stack_limit_large_frame` is not supported on {target}: only x86-64, \
+                     AArch64 and RISC-V 64 emit the prologue check"
+                ),
+            }
+            // The prologue's call is not a safepoint with a stack map, so a
+            // GC reference an argument register holds at that call is not a
+            // root for a collector that frees or moves objects.
+            if let Some(collector) = tunables.collector
+                && collector != wasmtime_environ::Collector::Null
+            {
+                bail!(
+                    "`stack_limit_large_frame` ({threshold}) is not supported with the \
+                     {collector} collector: the prologue check is not a safepoint with a \
+                     stack map, so a GC reference held in an argument register would not \
+                     be a root; use the null collector"
+                );
+            }
+            // Winch's prologue check traps against the real limit and has no
+            // resumable counterpart.
+            if tunables.winch_callable {
+                bail!(
+                    "`stack_limit_large_frame` ({threshold}) is not supported with the Winch \
+                     compiler, whose prologue stack check does not resume"
                 );
             }
         }
@@ -5193,6 +5265,11 @@ impl Engine {
     /// Returns the configured [`Config::stack_limit_location`] value.
     pub fn get_stack_limit_location(&self) -> StackLimitLocation {
         self.tunables().stack_limit_location
+    }
+
+    /// Returns the configured [`Config::stack_limit_large_frame`] value.
+    pub fn get_stack_limit_large_frame(&self) -> Option<u32> {
+        self.tunables().stack_limit_large_frame
     }
 
     /// Returns the configured [`Config::consume_fuel`] value.

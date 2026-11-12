@@ -607,3 +607,137 @@ async fn two_tasks_keep_their_own_reserve(config: &mut Config) -> Result<()> {
         .await??;
     Ok(())
 }
+
+/// The values `big` of `crate::stack_large_frame::big_module` keeps live: a
+/// frame of at least `8 * BIG_VALUES` = 40.6 KiB, more than the 32 KiB window
+/// a fixture stack is created with.
+const BIG_VALUES: usize = 5_200;
+
+/// A wasm function whose frame is more than the committed window of a fresh
+/// fixture stack, called with the real limit just above the edge of that
+/// window, overflows. The check must run before the prologue's first probe
+/// below the window: a probe there is a `SIGSEGV` that ends the test process.
+#[wasmtime_test(strategies(only(CraneliftNative)))]
+async fn a_large_frame_at_the_committed_edge_overflows_before_it_is_touched(
+    config: &mut Config,
+) -> Result<()> {
+    let _regions = fixture(config);
+    config
+        .max_wasm_stack(ENTRY_WINDOW / 2)
+        .stack_limit_large_frame(Some(4096))
+        .collector(Collector::Null);
+    let engine = Engine::new(config)?;
+    // `big` calls wasm, so it is a class A function: the checks of its body
+    // run only once its prologue has allocated and probed the frame, and the
+    // prologue check alone stands between the frame and the edge. A function
+    // that calls no wasm has the ISA's trapping check there already.
+    let module = Module::new(
+        &engine,
+        &crate::stack_large_frame::big_module(BIG_VALUES, "(func $noop)\n", "(call $noop)\n"),
+    )?;
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new_async(&mut store, &module, &[]).await?;
+    let big = instance.get_typed_func::<i64, i64>(&mut store, "big")?;
+    let error = big
+        .call_async(&mut store, 0)
+        .await
+        .expect_err("the frame does not fit under the real limit");
+    assert_eq!(error.downcast_ref::<Trap>(), Some(&Trap::StackOverflow));
+    Ok(())
+}
+
+/// A large frame called with its stack pointer above the reserve limit and
+/// its lowest address below it: the prologue check asks for the reserve
+/// before the frame is touched, with the frame's lowest address.
+///
+/// The fixture stack is `PROT_NONE` below its top window. The embedder
+/// commits nothing at the wasm entry and answers a reserve limit of
+/// `sp - 4 KiB`; the committed window below the entry is only
+/// `ENTRY_WINDOW`, and the frame of `big` is deeper than that. So the
+/// frame's pages below the window are committed by the second call of the
+/// callback or not at all: a prologue that probed them first would end the
+/// test process with a `SIGSEGV`.
+#[wasmtime_test(strategies(only(CraneliftNative)))]
+async fn a_large_frame_asks_for_the_reserve_at_its_lowest_address(
+    config: &mut Config,
+) -> Result<()> {
+    let regions = fixture(config);
+    config
+        .stack_limit_large_frame(Some(4096))
+        .collector(Collector::Null);
+    let engine = Engine::new(config)?;
+    // `mark` is `big`'s first operator: the host's stack pointer there lies
+    // below the frame of `big`, within a host call's depth of its lowest
+    // address.
+    let module = Module::new(
+        &engine,
+        &crate::stack_large_frame::big_module(
+            BIG_VALUES,
+            "(import \"host\" \"mark\" (func $mark))\n",
+            "(call $mark)\n",
+        ),
+    )?;
+    let mut store = Store::new(&engine, ());
+    let callback_sps = Arc::new(Mutex::new(Vec::new()));
+    {
+        let regions = regions.clone();
+        let callback_sps = callback_sps.clone();
+        store.stack_reserve_callback(move |_cx, sp| {
+            let mut sps = callback_sps.lock().unwrap();
+            sps.push(sp);
+            if sps.len() == 1 {
+                // The wasm entry: a reserve limit just below the entry, with
+                // nothing committed beyond the creation window.
+                return Ok(sp - 4096);
+            }
+            // The prologue check is asked for the frame's lowest address,
+            // which is at least `8 * BIG_VALUES` below the entry's stack
+            // pointer. Refusing here, before committing, ends the call with
+            // this message and leaves the frame untouched.
+            if sp + 8 * BIG_VALUES > sps[0] {
+                return Err(format_err!(
+                    "asked for the reserve at {sp:#x}, which is not the lowest address of a \
+                     frame of {} bytes entered at {:#x}",
+                    8 * BIG_VALUES,
+                    sps[0]
+                ));
+            }
+            drop(sps);
+            regions.commit(sp)
+        });
+    }
+    let mark_sp = Arc::new(AtomicUsize::new(0));
+    let mark = {
+        let mark_sp = mark_sp.clone();
+        Func::wrap(&mut store, move || {
+            mark_sp.store(current_sp(), Ordering::SeqCst);
+        })
+    };
+    let instance = Instance::new_async(&mut store, &module, &[mark.into()]).await?;
+    instance.get_memory(&mut store, "memory").unwrap().write(
+        &mut store,
+        0,
+        &crate::stack_large_frame::big_memory_image(BIG_VALUES),
+    )?;
+    let big = instance.get_typed_func::<i64, i64>(&mut store, "big")?;
+    let result = big.call_async(&mut store, 0).await?;
+    assert_eq!(result, crate::stack_large_frame::big_sum(BIG_VALUES));
+
+    let sps = callback_sps.lock().unwrap().clone();
+    let mark_sp = mark_sp.load(Ordering::SeqCst);
+    // The wasm entry and the prologue check, and no other check asked.
+    assert_eq!(sps.len(), 2, "{sps:#x?}");
+    let (entry_sp, target) = (sps[0], sps[1]);
+    // The frame's lowest address is below the reserve limit the entry set.
+    assert!(target < entry_sp - 4096, "{target:#x} vs {entry_sp:#x}");
+    // And the address is the frame's lowest, not the stack pointer on
+    // entry: `big` is a host call's depth above `mark_sp`, its first
+    // operator ran with the frame allocated.
+    assert!(
+        target > mark_sp && target - mark_sp <= 4096,
+        "the callback was given {target:#x} but the frame of `big` bottoms out near \
+         {mark_sp:#x}"
+    );
+    assert!(entry_sp - target >= 8 * BIG_VALUES);
+    Ok(())
+}

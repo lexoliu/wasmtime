@@ -817,6 +817,14 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         self.stack_limit_interrupt_branch(builder, sp, limit);
     }
 
+    /// Imports the `stack_limit_interrupt` builtin through its `preserve_all`
+    /// trampoline, as the checks in the function body call it and as a
+    /// function's `resumable_stack_limit` prologue check calls it.
+    pub(crate) fn stack_limit_interrupt_callee(&mut self, func: &mut Function) -> ir::FuncRef {
+        self.builtin_functions
+            .load_preserve_all_builtin(func, BuiltinFunctionIndex::stack_limit_interrupt())
+    }
+
     /// Branches to a cold block calling `stack_limit_interrupt(vmctx, sp)`
     /// when `sp < limit`, then continues in a fresh block either way.
     ///
@@ -846,9 +854,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         // (a function's parameters at entry, every loop-carried value at a
         // loop header) into a callee-saved register or a spill slot on the
         // hot path.
-        let stack_limit_interrupt = self
-            .builtin_functions
-            .load_preserve_all_builtin(builder.func, BuiltinFunctionIndex::stack_limit_interrupt());
+        let stack_limit_interrupt = self.stack_limit_interrupt_callee(builder.func);
         let vmctx = self.vmctx_val(&mut builder.cursor());
         builder.ins().call(stack_limit_interrupt, &[vmctx, sp]);
         builder.ins().jump(continuation_block, &[]);

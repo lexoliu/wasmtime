@@ -112,6 +112,16 @@ define_tunables! {
         /// against lives. Ignored unless `stack_limit_interruption` is set.
         pub stack_limit_location: StackLimitLocation,
 
+        /// The largest frame, in bytes, that a function's prologue does not
+        /// check. A function whose frame is larger compares the lowest
+        /// address of its frame with the stack limit `stack_limit_location`
+        /// names before allocating it, and calls the resumable
+        /// `stack_limit_interrupt` builtin when that address is below the
+        /// limit. `None` leaves such a function's frame to the checks of
+        /// `stack_limit_interruption`, which run once it is allocated.
+        /// Ignored unless `stack_limit_interruption` is set.
+        pub stack_limit_large_frame: Option<u32>,
+
         /// Whether or not linear memories are allowed to be reallocated after
         /// initial allocation at runtime.
         pub memory_may_move: bool,
@@ -277,6 +287,7 @@ impl Tunables {
             epoch_interruption: false,
             stack_limit_interruption: false,
             stack_limit_location: StackLimitLocation::StoreContext,
+            stack_limit_large_frame: None,
             memory_may_move: true,
             guard_before_linear_memory: true,
             table_lazy_init: true,
