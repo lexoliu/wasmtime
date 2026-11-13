@@ -29,21 +29,21 @@
 ;;       movq    0x90(%r10), %r10
 ;;       addq    $0x10, %r10
 ;;       cmpq    %rsp, %r10
-;;       ja      0x6a
-;;   3c: movq    8(%rdi), %r8
+;;       ja      0x8a
+;;   5c: movq    8(%rdi), %r8
 ;;       movq    %rsp, %r9
 ;;       cmpq    0x18(%r8), %r9
-;;       jb      0x5d
-;;   4d: subl    $1, %edx
+;;       jb      0x7d
+;;   6d: subl    $1, %edx
 ;;       testl   %edx, %edx
-;;       jne     0x40
-;;   58: movq    %rbp, %rsp
+;;       jne     0x60
+;;   78: movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   5d: movq    %rsp, %rsi
-;;   60: callq   0x186
-;;   65: jmp     0x4d
-;;   6a: ud2
+;;   7d: movq    %rsp, %rsi
+;;   80: callq   0x1c6
+;;   85: jmp     0x6d
+;;   8a: ud2
 ;;
 ;; wasm[0]::function[2]::caller:
 ;;       pushq   %rbp
@@ -51,14 +51,14 @@
 ;;       movq    8(%rdi), %rsi
 ;;       movq    %rsp, %r8
 ;;       cmpq    0x18(%rsi), %r8
-;;       jb      0xa5
-;;   95: movq    %rdi, %rsi
+;;       jb      0xe5
+;;   d5: movq    %rdi, %rsi
 ;;       movq    %rsi, %rdi
 ;;       callq   0
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   a5: movq    %rsp, %rsi
-;;   a8: callq   0x186
-;;   ad: movq    %rdi, %rsi
-;;   b0: jmp     0x98
+;;   e5: movq    %rsp, %rsi
+;;   e8: callq   0x1c6
+;;   ed: movq    %rdi, %rsi
+;;   f0: jmp     0xd8

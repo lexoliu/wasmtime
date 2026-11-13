@@ -122,10 +122,10 @@
 ;;       pushq   %rbp
 ;;       movq    %rsp, %rbp
 ;;       btq     $0x28, %rdx
-;;       jb      0x99
-;;   8f: movl    $0x190, %eax
-;;       jmp     0x9e
-;;   99: movl    $0x64, %eax
+;;       jb      0xd9
+;;   cf: movl    $0x190, %eax
+;;       jmp     0xde
+;;   d9: movl    $0x64, %eax
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
@@ -154,10 +154,10 @@
 ;;       pushq   %rbp
 ;;       movq    %rsp, %rbp
 ;;       btl     %ecx, %edx
-;;       jb      0x117
-;;  10d: movl    $0xc8, %eax
-;;       jmp     0x11c
-;;  117: movl    $0x64, %eax
+;;       jb      0x197
+;;  18d: movl    $0xc8, %eax
+;;       jmp     0x19c
+;;  197: movl    $0x64, %eax
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
@@ -186,10 +186,10 @@
 ;;       pushq   %rbp
 ;;       movq    %rsp, %rbp
 ;;       btq     %rcx, %rdx
-;;       jb      0x198
-;;  18e: movl    $0xc8, %eax
-;;       jmp     0x19d
-;;  198: movl    $0x64, %eax
+;;       jb      0x258
+;;  24e: movl    $0xc8, %eax
+;;       jmp     0x25d
+;;  258: movl    $0x64, %eax
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq

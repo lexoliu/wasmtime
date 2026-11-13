@@ -1492,9 +1492,12 @@ impl MachInst for Inst {
     fn function_alignment() -> FunctionAlignment {
         FunctionAlignment {
             minimum: 1,
-            // Change the alignment from 16-bytes to 32-bytes for better performance.
-            // fix-8573: https://github.com/bytecodealliance/wasmtime/issues/8573
-            preferred: 32,
+            // One cache line. At 32 bytes a function starts at either half of
+            // a line, and which half depends on the sizes of the functions
+            // before it: an interpreter loop that moved from the start of a
+            // line to its middle, with an identical instruction stream, ran
+            // 33% to 71% slower on AMD Zen 3 and Zen 4.
+            preferred: 64,
         }
     }
 

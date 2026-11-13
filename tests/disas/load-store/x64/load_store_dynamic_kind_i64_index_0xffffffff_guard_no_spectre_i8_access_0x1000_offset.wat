@@ -34,10 +34,10 @@
 ;;       pushq   %rbp
 ;;       movq    %rsp, %rbp
 ;;       cmpq    0x40(%rdi), %rdx
-;;       ja      0x40
-;;   2e: movq    0x38(%rdi), %rsi
+;;       ja      0x60
+;;   4e: movq    0x38(%rdi), %rsi
 ;;       movzbq  0x1000(%rsi, %rdx), %rax
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   40: ud2
+;;   60: ud2

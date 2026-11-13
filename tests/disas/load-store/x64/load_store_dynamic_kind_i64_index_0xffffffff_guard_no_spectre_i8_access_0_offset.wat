@@ -34,10 +34,10 @@
 ;;       pushq   %rbp
 ;;       movq    %rsp, %rbp
 ;;       cmpq    0x40(%rdi), %rdx
-;;       jae     0x3c
-;;   2e: movq    0x38(%rdi), %rsi
+;;       jae     0x5c
+;;   4e: movq    0x38(%rdi), %rsi
 ;;       movzbq  (%rsi, %rdx), %rax
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   3c: ud2
+;;   5c: ud2

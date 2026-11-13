@@ -70,15 +70,15 @@
 ;;       movq    0x18(%r10), %r10
 ;;       addq    $0x10, %r10
 ;;       cmpq    %rsp, %r10
-;;       ja      0x4f
-;;   39: movq    %rdi, %rsi
+;;       ja      0x6f
+;;   59: movq    %rdi, %rsi
 ;;       movq    0x48(%rdi), %rdi
 ;;       movl    $0x4d2, %edx
-;;       callq   0x60
+;;       callq   0x80
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   4f: ud2
+;;   6f: ud2
 ;;
 ;; wasm[2]::function[2]:
 ;;       pushq   %rbp
@@ -87,8 +87,8 @@
 ;;       movq    0x18(%r10), %r10
 ;;       addq    $0x60, %r10
 ;;       cmpq    %rsp, %r10
-;;       ja      0x13e
-;;   79: subq    $0x50, %rsp
+;;       ja      0x15e
+;;   99: subq    $0x50, %rsp
 ;;       movq    %rbx, 0x20(%rsp)
 ;;       movq    %r12, 0x28(%rsp)
 ;;       movq    %r13, 0x30(%rsp)
@@ -101,24 +101,24 @@
 ;;       movq    %rcx, 0x10(%rsp)
 ;;       testl   %esi, %esi
 ;;       movq    %rsi, 8(%rsp)
-;;       jne     0xd5
-;;   b9: movq    (%rsp), %rdi
+;;       jne     0xf5
+;;   d9: movq    (%rsp), %rdi
 ;;       movq    0x58(%rdi), %rax
 ;;       movq    0x68(%rdi), %rdi
 ;;       movl    $0x17, %edx
 ;;       movq    (%rsp), %rsi
 ;;       callq   *%rax
 ;;       ├─╼ exception frame offset: SP = FP - 0x50
-;;       ╰─╼ exception handler: default handler, context at [SP+0x0], handler=0x121
-;;       jmp     0x11f
-;;   d5: movq    (%rsp), %rcx
+;;       ╰─╼ exception handler: default handler, context at [SP+0x0], handler=0x141
+;;       jmp     0x13f
+;;   f5: movq    (%rsp), %rcx
 ;;       movq    0x70(%rcx), %rax
 ;;       movl    (%rax), %eax
 ;;       movq    0x48(%rcx), %rdi
 ;;       movq    (%rsp), %rsi
 ;;       callq   0
 ;;       ├─╼ exception frame offset: SP = FP - 0x50
-;;       ╰─╼ exception handler: default handler, context at [SP+0x0], handler=0x121
+;;       ╰─╼ exception handler: default handler, context at [SP+0x0], handler=0x141
 ;;       movq    0x10(%rsp), %rcx
 ;;       movq    8(%rsp), %rsi
 ;;       movl    %esi, (%rcx)
@@ -131,14 +131,14 @@
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;  11a: jmp     0x121
-;;  11f: ud2
-;;  121: movq    (%rsp), %rcx
-;;  125: movq    0x58(%rcx), %rcx
-;;  129: movq    (%rsp), %rax
-;;  12d: movq    0x68(%rax), %rdi
-;;  131: movl    $0x31, %edx
-;;  136: movq    (%rsp), %rsi
-;;  13a: callq   *%rcx
-;;  13c: ud2
-;;  13e: ud2
+;;  13a: jmp     0x141
+;;  13f: ud2
+;;  141: movq    (%rsp), %rcx
+;;  145: movq    0x58(%rcx), %rcx
+;;  149: movq    (%rsp), %rax
+;;  14d: movq    0x68(%rax), %rdi
+;;  151: movl    $0x31, %edx
+;;  156: movq    (%rsp), %rsi
+;;  15a: callq   *%rcx
+;;  15c: ud2
+;;  15e: ud2

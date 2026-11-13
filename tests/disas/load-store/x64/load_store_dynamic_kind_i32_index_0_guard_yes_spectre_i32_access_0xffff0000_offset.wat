@@ -48,8 +48,8 @@
 ;;       movl    %edx, %edi
 ;;       movq    %rdi, %rax
 ;;       addq    0x2d(%rip), %rax
-;;       jb      0x9d
-;;   79: movq    %rcx, %rsi
+;;       jb      0xbd
+;;   99: movq    %rcx, %rsi
 ;;       movq    0x40(%rsi), %rdx
 ;;       xorq    %rcx, %rcx
 ;;       addq    0x38(%rsi), %rdi
@@ -61,5 +61,5 @@
 ;;       movq    %rbp, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   9d: ud2
-;;   9f: addb    %al, (%rax, %rax)
+;;   bd: ud2
+;;   bf: addb    %al, (%rax, %rax)
