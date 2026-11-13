@@ -12,9 +12,9 @@ use wasmtime_environ::prelude::TryPrimaryMap;
 
 #[cfg(feature = "component-model-async")]
 use crate::{
-    component::ResourceTable,
-    component::concurrent::ConcurrentState,
-    runtime::vm::{VMStore, component::InstanceState},
+    component::concurrent::{ConcurrentState, ErasedGuestMemoryResidency},
+    component::{GuestMemoryResidency, ResourceTable},
+    runtime::vm::{AlwaysMut, VMStore, component::InstanceState},
 };
 
 /// Default amount of fuel allowed for all guest-to-host calls in the component
@@ -56,6 +56,13 @@ pub struct ComponentStoreData {
     /// Caps the size of the allocations made on the host to this amount
     /// effectively.
     hostcall_fuel: usize,
+
+    /// The embedder's hook for the guest bytes the event loop copies, if it
+    /// registered one. See [`Store::set_guest_memory_residency`]. Only ever
+    /// called through `&mut`, so the hook need not be `Sync` for the store to
+    /// be.
+    #[cfg(feature = "component-model-async")]
+    pub(crate) guest_memory_residency: Option<AlwaysMut<Box<dyn ErasedGuestMemoryResidency>>>,
 }
 
 /// State tracking for tasks within components.
@@ -104,6 +111,8 @@ impl ComponentStoreData {
                 ComponentTaskState::NotConcurrent(Default::default())
             },
             hostcall_fuel: DEFAULT_HOSTCALL_FUEL,
+            #[cfg(feature = "component-model-async")]
+            guest_memory_residency: None,
         }
     }
 
@@ -515,6 +524,29 @@ impl<T> Store<T> {
     pub fn concurrent_resource_table(&mut self) -> Option<&mut ResourceTable> {
         self.as_context_mut().0.concurrent_resource_table()
     }
+
+    /// Registers the hook this store's event loop consults before it copies
+    /// guest bytes on the host's behalf, replacing any registered before.
+    ///
+    /// The event loop copies guest bytes for `stream` and `future` transfers
+    /// between a guest and the host: a flat payload a host producer delivers,
+    /// the flat items a host consumer takes, and the `stream<u8>` direct
+    /// views. Those copies run off any guest fiber, so an embedder whose
+    /// linear memories can lose pages (and resolve a touch of one by blocking
+    /// the fiber that made it) registers a hook here to have every such copy
+    /// wait until its bytes are present. With a hook registered, a host
+    /// consumer whose payload holds strings or lists is polled on a worker
+    /// fiber instead, because the bytes its lift follows cannot be named in
+    /// advance. See [`GuestMemoryResidency`] for the contract.
+    ///
+    /// Only a store whose engine has
+    /// [`Config::concurrency_support`](crate::Config::concurrency_support)
+    /// enabled has an event loop; on any other store the hook is never
+    /// called.
+    #[cfg(feature = "component-model-async")]
+    pub fn set_guest_memory_residency(&mut self, residency: impl GuestMemoryResidency) {
+        self.as_context_mut().set_guest_memory_residency(residency)
+    }
 }
 
 impl<T> StoreContextMut<'_, T> {
@@ -532,6 +564,13 @@ impl<T> StoreContextMut<'_, T> {
     #[cfg(feature = "component-model-async")]
     pub fn concurrent_resource_table(&mut self) -> Option<&mut ResourceTable> {
         self.0.concurrent_resource_table()
+    }
+
+    /// See [`Store::set_guest_memory_residency`].
+    #[cfg(feature = "component-model-async")]
+    pub fn set_guest_memory_residency(&mut self, residency: impl GuestMemoryResidency) {
+        self.0.component_data_mut().guest_memory_residency =
+            Some(AlwaysMut::new(Box::new(residency)));
     }
 }
 
