@@ -42,3 +42,8 @@ std = []
 # Use embedder-provided stack-switching routines on unsupported architectures.
 # See `src/stackswitch/custom.rs` for the C ABI the embedder must implement.
 custom = []
+
+# Sign the return address a suspended aarch64 fiber keeps on its stack. Sound
+# only when every thread that resumes a fiber uses the instruction key that
+# suspended it.
+return-address-signing = []

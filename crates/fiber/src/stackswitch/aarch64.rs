@@ -10,6 +10,40 @@
 
 use core::arch::naked_asm;
 
+// With the `return-address-signing` feature, the return address a suspended
+// fiber keeps on its stack is signed with the stack pointer as the modifier,
+// and `.cfi_window_save` (`DW_CFA_AARCH64_negate_ra_state`) tells an unwinder
+// about it. This is sound only when every thread that resumes a fiber uses the
+// instruction key that suspended it. Without the feature these expand to
+// nothing. The key is A, except on Apple platforms where it is B.
+cfg_select! {
+    not(feature = "return-address-signing") => {
+        macro_rules! pacisp { () => (""); }
+        macro_rules! autisp { () => (""); }
+        macro_rules! window_save { () => (""); }
+    }
+    target_vendor = "apple" => {
+        macro_rules! pacisp { () => ("pacibsp\n"); }
+        macro_rules! autisp { () => ("autibsp\n"); }
+        macro_rules! window_save { () => (".cfi_window_save\n"); }
+    }
+    _ => {
+        macro_rules! pacisp { () => ("paciasp\n"); }
+        macro_rules! autisp { () => ("autiasp\n"); }
+        macro_rules! window_save { () => (".cfi_window_save\n"); }
+    }
+}
+
+#[cfg(feature = "return-address-signing")]
+cfg_select! {
+    target_vendor = "apple" => {
+        macro_rules! paci1716 { () => ("pacib1716\n"); }
+    }
+    _ => {
+        macro_rules! paci1716 { () => ("pacia1716\n"); }
+    }
+}
+
 #[inline(never)] // FIXME(rust-lang/rust#148307)
 pub(crate) unsafe extern "C" fn wasmtime_fiber_switch(top_of_stack: *mut u8) {
     unsafe { wasmtime_fiber_switch_(top_of_stack) }
@@ -17,7 +51,7 @@ pub(crate) unsafe extern "C" fn wasmtime_fiber_switch(top_of_stack: *mut u8) {
 
 #[unsafe(naked)]
 unsafe extern "C" fn wasmtime_fiber_switch_(top_of_stack: *mut u8 /* x0 */) {
-    naked_asm!(
+    naked_asm!(concat!(
         "
             .cfi_startproc
             // `bti c`, spelled as `hint #34` so that it assembles without
@@ -26,6 +60,10 @@ unsafe extern "C" fn wasmtime_fiber_switch_(top_of_stack: *mut u8 /* x0 */) {
             // `wasmtime_fiber_start`, which a guarded page accepts only at a
             // call landing pad. It is a NOP without BTI.
             hint #34
+        ",
+        pacisp!(),
+        window_save!(),
+        "
             // Save all callee-saved registers on the stack since we're
             // assuming they're clobbered as a result of the stack switch.
             stp x29, x30, [sp, -16]!
@@ -60,10 +98,14 @@ unsafe extern "C" fn wasmtime_fiber_switch_(top_of_stack: *mut u8 /* x0 */) {
             ldp x25, x26, [sp], 16
             ldp x27, x28, [sp], 16
             ldp x29, x30, [sp], 16
+        ",
+        autisp!(),
+        window_save!(),
+        "
             ret
             .cfi_endproc
         ",
-    );
+    ));
 }
 
 pub(crate) unsafe fn wasmtime_fiber_init(
@@ -109,7 +151,14 @@ pub(crate) unsafe fn wasmtime_fiber_init(
             x20: entry_point as *mut u8,
             x21: entry_arg0,
             x22: wasmtime_fiber_switch_ as *mut u8,
-            lr: wasmtime_fiber_start as *mut u8,
+            lr: initial_lr(
+                wasmtime_fiber_start as *mut u8,
+                // The stack pointer after the last pop of the switch
+                // epilogue, which is where `last_sp` lives.
+                initial_stack
+                    .cast::<u8>()
+                    .add(core::mem::offset_of!(InitialStack, last_sp)),
+            ),
 
             last_sp: initial_stack.cast(),
             ..InitialStack::default()
@@ -117,12 +166,38 @@ pub(crate) unsafe fn wasmtime_fiber_init(
     }
 }
 
+/// The `lr` slot of a new fiber's initial frame.
+///
+/// With `return-address-signing` it is signed, because the first switch into
+/// the fiber ends with `autisp!()`. The modifier is the stack pointer at that
+/// point: after the ten 16-byte pops of the switch epilogue it points at
+/// `InitialStack::last_sp`.
+#[cfg(feature = "return-address-signing")]
+fn initial_lr(mut lr: *mut u8, modifier: *mut u8) -> *mut u8 {
+    // Not `pure`: the result depends on the key registers, which the compiler
+    // cannot see.
+    unsafe {
+        core::arch::asm!(
+            paci1716!(),
+            inout("x17") lr,
+            in("x16") modifier,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    lr
+}
+
+#[cfg(not(feature = "return-address-signing"))]
+fn initial_lr(lr: *mut u8, _modifier: *mut u8) -> *mut u8 {
+    lr
+}
+
 // See the x86_64 file for more commentary on what these CFI directives are
 // doing. Like over there note that the relative offsets to registers here
 // match the frame layout in `wasmtime_fiber_switch`.
 #[unsafe(naked)]
 unsafe extern "C" fn wasmtime_fiber_start() -> ! {
-    naked_asm!(
+    naked_asm!(concat!(
         "
         .cfi_startproc simple
         .cfi_def_cfa_offset 0
@@ -133,6 +208,9 @@ unsafe extern "C" fn wasmtime_fiber_start() -> ! {
             0x23, 0xa0, 0x1  /* DW_OP_plus_uconst 0xa0 */
         .cfi_rel_offset x30, -0x08
         .cfi_rel_offset x29, -0x10
+        ",
+        window_save!(),
+        "
         .cfi_rel_offset x28, -0x18
         .cfi_rel_offset x27, -0x20
         .cfi_rel_offset x26, -0x28
@@ -164,7 +242,7 @@ unsafe extern "C" fn wasmtime_fiber_start() -> ! {
         brk 0xf1b3
         .cfi_endproc
         ",
-    );
+    ));
 }
 
 #[cfg(test)]
@@ -194,5 +272,24 @@ mod tests {
     #[test]
     fn switch_begins_with_call_landing_pad() {
         assert_eq!(switch_words().next(), Some(0xd503_245f));
+    }
+
+    #[cfg(feature = "return-address-signing")]
+    #[test]
+    fn switch_signs_and_authenticates_return_address() {
+        // Word 0 is the `bti c` pad.
+        let (sign, auth) = if cfg!(target_vendor = "apple") {
+            (0xd503_237f, 0xd503_23ff) // pacibsp, autibsp
+        } else {
+            (0xd503_233f, 0xd503_23bf) // paciasp, autiasp
+        };
+        assert_eq!(switch_words().nth(1), Some(sign));
+        // The word before the final `ret`.
+        let (mut before_ret, mut last) = (0, 0);
+        for word in switch_words() {
+            (before_ret, last) = (last, word);
+        }
+        assert_eq!(last, RET);
+        assert_eq!(before_ret, auth);
     }
 }
