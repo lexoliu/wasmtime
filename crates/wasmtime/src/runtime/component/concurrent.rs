@@ -115,6 +115,8 @@ pub use futures_and_streams::{
     StreamProducer, StreamReader, StreamResult, VecBuffer, WriteBuffer,
 };
 pub(crate) use futures_and_streams::{ResourcePair, lower_error_context_to_index};
+pub(crate) use residency::ErasedGuestMemoryResidency;
+pub use residency::GuestMemoryResidency;
 #[cfg(feature = "task-group-hook")]
 pub use task_group_hook::TaskGroupHook;
 pub use task_group_hook::TaskGroupId;
@@ -124,6 +126,7 @@ mod error_contexts;
 mod func;
 mod future_stream_any;
 mod futures_and_streams;
+mod residency;
 pub(crate) mod table;
 #[cfg(feature = "task-group-hook")]
 mod task_group_hook;
