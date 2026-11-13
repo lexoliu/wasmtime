@@ -20,6 +20,12 @@ unsafe extern "C" fn wasmtime_fiber_switch_(top_of_stack: *mut u8 /* x0 */) {
     naked_asm!(
         "
             .cfi_startproc
+            // `bti c`, spelled as `hint #34` so that it assembles without
+            // the `bti` target feature: the final switch of a finished fiber
+            // reaches this function with `blr x22` from
+            // `wasmtime_fiber_start`, which a guarded page accepts only at a
+            // call landing pad. It is a NOP without BTI.
+            hint #34
             // Save all callee-saved registers on the stack since we're
             // assuming they're clobbered as a result of the stack switch.
             stp x29, x30, [sp, -16]!
@@ -159,4 +165,34 @@ unsafe extern "C" fn wasmtime_fiber_start() -> ! {
         .cfi_endproc
         ",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wasmtime_fiber_switch_;
+
+    const RET: u32 = 0xd65f_03c0;
+
+    fn switch_words() -> impl Iterator<Item = u32> {
+        let start = wasmtime_fiber_switch_ as *const u32;
+        // SAFETY: the function is a straight line of instructions that ends
+        // with `ret`, and iteration stops at that `ret`.
+        let mut words = (0..).map(move |i| unsafe { start.add(i).read() });
+        let mut done = false;
+        core::iter::from_fn(move || {
+            if done {
+                return None;
+            }
+            let word = words.next()?;
+            done = word == RET;
+            Some(word)
+        })
+    }
+
+    /// `bti c` (`hint #34`) must be the first instruction: the final switch of
+    /// a finished fiber reaches this function with `blr`.
+    #[test]
+    fn switch_begins_with_call_landing_pad() {
+        assert_eq!(switch_words().next(), Some(0xd503_245f));
+    }
 }
