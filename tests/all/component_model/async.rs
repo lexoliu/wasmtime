@@ -1066,6 +1066,313 @@ async fn async_call_stack() -> Result<()> {
     Ok(())
 }
 
+/// A residency hook that reports the first span it is asked about as absent
+/// and every later one as present. Its wait yields once and then records the
+/// span's bytes, which shows whether the copy ran before the wait finished.
+struct AbsentOnce {
+    asked: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+    seen_during_wait: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+}
+
+impl GuestMemoryResidency for AbsentOnce {
+    type Error = std::convert::Infallible;
+    type Wait = Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>;
+
+    fn wait_until_resident(&mut self, bytes: std::ptr::NonNull<[u8]>) -> Option<Self::Wait> {
+        let mut asked = self.asked.lock().unwrap();
+        asked.push(bytes.len());
+        if asked.len() > 1 {
+            return None;
+        }
+        let address = bytes.cast::<u8>().as_ptr() as usize;
+        let len = bytes.len();
+        let seen = self.seen_during_wait.clone();
+        Some(Box::pin(async move {
+            tokio::task::yield_now().await;
+            // SAFETY: the span lies inside the guest's linear memory, which
+            // the store keeps alive and in place while it polls this wait.
+            let bytes = unsafe { std::slice::from_raw_parts(address as *const u8, len) };
+            *seen.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }))
+    }
+}
+
+/// A host producer delivering into a guest `stream<u8>` read buffer asks the
+/// residency hook about that buffer first, and writes nothing into it until
+/// the hook's wait has finished and a fresh check finds it present.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn guest_memory_residency_holds_a_delivery_until_the_buffer_is_present() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    config.wasm_component_model_async_stackful(true);
+    let engine = Engine::new(&config)?;
+
+    let component = Component::new(
+        &engine,
+        r#"
+(component
+  (core module $libc (memory (export "memory") 1))
+  (core instance $libc (instantiate $libc))
+  (core module $m
+    (import "" "memory" (memory 1))
+    (import "" "stream.read" (func $stream.read (param i32 i32 i32) (result i32)))
+    (import "" "stream.drop-readable" (func $stream.drop-readable (param i32)))
+    (import "" "waitable.join" (func $waitable.join (param i32 i32)))
+    (import "" "waitable-set.new" (func $waitable-set.new (result i32)))
+    (import "" "waitable-set.wait" (func $waitable-set.wait (param i32 i32) (result i32)))
+    (import "" "waitable-set.drop" (func $waitable-set.drop (param i32)))
+    (import "" "task.return" (func $task.return (param i32)))
+
+    (func (export "run") (param $sr i32)
+      (local $ws i32)
+      ;; The hook reports the buffer absent, so the read cannot complete in
+      ;; the call that starts it.
+      (if (i32.ne
+            (call $stream.read (local.get $sr) (i32.const 0x100) (i32.const 4))
+            (i32.const -1))
+        (then unreachable))
+      (local.set $ws (call $waitable-set.new))
+      (call $waitable.join (local.get $sr) (local.get $ws))
+      (drop (call $waitable-set.wait (local.get $ws) (i32.const 0x200)))
+      ;; The event's payload carries the count of items read in its high bits.
+      (if (i32.ne
+            (i32.shr_u (i32.load (i32.const 0x204)) (i32.const 4))
+            (i32.const 4))
+        (then unreachable))
+      (call $waitable.join (local.get $sr) (i32.const 0))
+      (call $waitable-set.drop (local.get $ws))
+      (call $stream.drop-readable (local.get $sr))
+      (call $task.return (i32.load (i32.const 0x100)))
+    )
+  )
+
+  (type $s (stream u8))
+  (core func $stream.read (canon stream.read $s async (memory $libc "memory")))
+  (core func $stream.drop-readable (canon stream.drop-readable $s))
+  (core func $task.return (canon task.return (result u32)))
+  (canon waitable.join (core func $waitable.join))
+  (canon waitable-set.new (core func $waitable-set.new))
+  (canon waitable-set.wait (memory $libc "memory") (core func $waitable-set.wait))
+  (canon waitable-set.drop (core func $waitable-set.drop))
+
+  (core instance $i (instantiate $m
+    (with "" (instance
+      (export "memory" (memory $libc "memory"))
+      (export "stream.read" (func $stream.read))
+      (export "stream.drop-readable" (func $stream.drop-readable))
+      (export "waitable.join" (func $waitable.join))
+      (export "waitable-set.new" (func $waitable-set.new))
+      (export "waitable-set.wait" (func $waitable-set.wait))
+      (export "waitable-set.drop" (func $waitable-set.drop))
+      (export "task.return" (func $task.return))
+    ))
+  ))
+
+  (func (export "run") async (param "s" (stream u8)) (result u32)
+    (canon lift (core func $i "run") async (memory $libc "memory")))
+)
+        "#,
+    )?;
+
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_during_wait = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut store = Store::new(&engine, ());
+    store.set_guest_memory_residency(AbsentOnce {
+        asked: asked.clone(),
+        seen_during_wait: seen_during_wait.clone(),
+    });
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let func = instance.get_typed_func::<(StreamReader<u8>,), (u32,)>(&mut store, "run")?;
+
+    let reader = StreamReader::new(&mut store, bytes::Bytes::from_static(&[1, 2, 3, 4]))?;
+    let (delivered,) = func.call_async(&mut store, (reader,)).await?;
+
+    assert_eq!(delivered, u32::from_le_bytes([1, 2, 3, 4]));
+    assert_eq!(
+        seen_during_wait.lock().unwrap().as_deref(),
+        Some(&[0u8; 4][..]),
+        "the buffer was written before the residency wait finished",
+    );
+    let asked = asked.lock().unwrap();
+    assert!(
+        asked.len() >= 2,
+        "the buffer was not re-checked after the wait: {asked:?}"
+    );
+    assert!(
+        asked.iter().all(|&len| len == 4),
+        "unexpected spans: {asked:?}"
+    );
+    Ok(())
+}
+
+/// A residency hook that never reports anything absent.
+struct AlwaysPresent;
+
+impl GuestMemoryResidency for AlwaysPresent {
+    type Error = std::convert::Infallible;
+    type Wait = std::future::Ready<Result<(), Self::Error>>;
+
+    fn wait_until_resident(&mut self, _: std::ptr::NonNull<[u8]>) -> Option<Self::Wait> {
+        None
+    }
+}
+
+/// With a residency hook registered, a host consumer lifting a payload that
+/// holds pointers is polled from the worker fiber, and a consumer that answers
+/// `Pending` is polled again once it wakes.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn guest_memory_residency_consumes_a_pointer_payload_after_a_pending_poll() -> Result<()> {
+    use futures::task::AtomicWaker;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    config.wasm_component_model_async_stackful(true);
+    let engine = Engine::new(&config)?;
+
+    let component = Component::new(
+        &engine,
+        r#"
+(component
+  (core module $libc
+    (memory (export "memory") 1)
+    (data (i32.const 0x100) "hello"))
+  (core instance $libc (instantiate $libc))
+  (core module $m
+    (import "" "memory" (memory 1))
+    (import "" "future.new" (func $future.new (result i64)))
+    (import "" "future.write" (func $future.write (param i32 i32) (result i32)))
+    (import "" "future.drop-writable" (func $future.drop-writable (param i32)))
+    (import "" "waitable.join" (func $waitable.join (param i32 i32)))
+    (import "" "waitable-set.new" (func $waitable-set.new (result i32)))
+    (import "" "waitable-set.wait" (func $waitable-set.wait (param i32 i32) (result i32)))
+    (import "" "waitable-set.drop" (func $waitable-set.drop (param i32)))
+    (import "" "task.return" (func $task.return (param i32)))
+
+    (func (export "run")
+      (local $pair i64)
+      (local $tx i32)
+      (local $ws i32)
+      (local.set $pair (call $future.new))
+      (local.set $tx (i32.wrap_i64 (i64.shr_u (local.get $pair) (i64.const 32))))
+      (call $task.return (i32.wrap_i64 (local.get $pair)))
+      ;; The string "hello" at 0x100, as a (pointer, length) pair at 0x80.
+      (i32.store (i32.const 0x80) (i32.const 0x100))
+      (i32.store (i32.const 0x84) (i32.const 5))
+      (if (i32.ne (call $future.write (local.get $tx) (i32.const 0x80)) (i32.const -1))
+        (then unreachable))
+      (local.set $ws (call $waitable-set.new))
+      (call $waitable.join (local.get $tx) (local.get $ws))
+      (drop (call $waitable-set.wait (local.get $ws) (i32.const 0x200)))
+      (call $waitable.join (local.get $tx) (i32.const 0))
+      (call $waitable-set.drop (local.get $ws))
+      (call $future.drop-writable (local.get $tx))
+    )
+  )
+
+  (type $f (future string))
+  (core func $future.new (canon future.new $f))
+  (core func $future.write (canon future.write $f async (memory $libc "memory")))
+  (core func $future.drop-writable (canon future.drop-writable $f))
+  (core func $task.return (canon task.return (result $f)))
+  (canon waitable.join (core func $waitable.join))
+  (canon waitable-set.new (core func $waitable-set.new))
+  (canon waitable-set.wait (memory $libc "memory") (core func $waitable-set.wait))
+  (canon waitable-set.drop (core func $waitable-set.drop))
+
+  (core instance $i (instantiate $m
+    (with "" (instance
+      (export "memory" (memory $libc "memory"))
+      (export "future.new" (func $future.new))
+      (export "future.write" (func $future.write))
+      (export "future.drop-writable" (func $future.drop-writable))
+      (export "waitable.join" (func $waitable.join))
+      (export "waitable-set.new" (func $waitable-set.new))
+      (export "waitable-set.wait" (func $waitable-set.wait))
+      (export "waitable-set.drop" (func $waitable-set.drop))
+      (export "task.return" (func $task.return))
+    ))
+  ))
+
+  (func (export "run") async (result $f)
+    (canon lift (core func $i "run") async (memory $libc "memory")))
+)
+        "#,
+    )?;
+
+    #[derive(Default)]
+    struct Delivery {
+        value: Mutex<Option<String>>,
+        waiter: AtomicWaker,
+    }
+
+    struct PendingOnce {
+        polls: Arc<AtomicUsize>,
+        delivery: Arc<Delivery>,
+    }
+
+    impl FutureConsumer<()> for PendingOnce {
+        type Item = String;
+
+        fn poll_consume(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            store: StoreContextMut<()>,
+            mut source: Source<'_, Self::Item>,
+            finish: bool,
+        ) -> Poll<Result<()>> {
+            assert!(!finish, "the delivery was cancelled");
+            if self.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let mut value = None::<String>;
+            source.read(store, &mut value)?;
+            *self.delivery.value.lock().unwrap() = value;
+            self.delivery.waiter.wake();
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let mut store = Store::new(&engine, ());
+    store.set_guest_memory_residency(AlwaysPresent);
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let func = instance.get_typed_func::<(), (FutureReader<String>,)>(&mut store, "run")?;
+
+    let polls = Arc::new(AtomicUsize::new(0));
+    let delivery = Arc::new(Delivery::default());
+    let consumer = PendingOnce {
+        polls: polls.clone(),
+        delivery: delivery.clone(),
+    };
+    let received = store
+        .run_concurrent(async |accessor| -> Result<String> {
+            let (reader,) = func.call_concurrent(accessor, ()).await?;
+            accessor.with(|store| reader.pipe(store, consumer))?;
+            Ok(std::future::poll_fn(|cx| {
+                delivery.waiter.register(cx.waker());
+                match delivery.value.lock().unwrap().take() {
+                    Some(value) => Poll::Ready(value),
+                    None => Poll::Pending,
+                }
+            })
+            .await)
+        })
+        .await??;
+
+    assert_eq!(received, "hello");
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
 fn inter_component_stream_is_not_intra_component() -> Result<()> {

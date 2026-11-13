@@ -1,3 +1,4 @@
+use super::residency::{ResidencyCheck, guest_span};
 use super::table::{TableDebug, TableId};
 use super::{Event, GlobalErrorContextRefCount, Waitable, WaitableCommon};
 use crate::component::concurrent::{ConcurrentState, QualifiedThreadId, WorkItem, tls};
@@ -20,6 +21,7 @@ use crate::{
     error::{Context as _, format_err},
 };
 use alloc::sync::Arc;
+use alloc::task::Wake;
 use buffers::{Extender, SliceBuffer, UntypedWriteBuffer};
 use core::any::{Any, TypeId};
 use core::fmt;
@@ -29,8 +31,11 @@ use core::marker::PhantomData;
 use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, Waker, ready};
 use futures::channel::oneshot;
+use futures::task::AtomicWaker;
 use futures::{FutureExt as _, stream};
 use wasmtime_environ::component::{
     CanonicalAbiInfo, ComponentTypes, InterfaceType, OptionsIndex, RuntimeComponentInstanceIndex,
@@ -2679,8 +2684,22 @@ impl<T> StoreContextMut<'_, T> {
                     let (mine, buffer) = &mut *state;
 
                     let (result, cancelled) = if buffer.remaining().is_empty() {
+                        let mut residency = ResidencyCheck::default();
                         future::poll_fn(|cx| {
                             tls::get(|store| {
+                                // A `u8` producer may copy straight into the
+                                // guest's read buffer through a direct view,
+                                // in this same poll, so whatever is left of
+                                // that buffer must be present before it runs.
+                                if residency
+                                    .poll(cx, store.store_opaque_mut(), |store| {
+                                        direct_read_span(store, id)
+                                    })?
+                                    .is_pending()
+                                {
+                                    return Ok(Poll::Pending);
+                                }
+
                                 let transmit = store.concurrent_state_mut()?.get_mut(id)?;
 
                                 let &WriteState::HostReady { cancel, .. } = &transmit.write else {
@@ -2857,47 +2876,46 @@ impl<T> StoreContextMut<'_, T> {
         let consume_with_buffer = {
             let consumer = consumer.clone();
             async move |mut host_buffer: Option<&mut dyn WriteBuffer<C::Item>>| {
-                let mut mine = consumer.take()?;
-
                 let host_buffer_remaining_before =
                     host_buffer.as_deref_mut().map(|v| v.remaining().len());
 
-                let (result, cancelled) = future::poll_fn(|cx| {
-                    tls::get(|store| {
-                        let cancel = match &store.concurrent_state_mut()?.get_mut(id)?.read {
-                            &ReadState::HostReady { cancel, .. } => cancel,
-                            ReadState::Open => false,
-                            _ => bail_bug!("unexpected read state"),
-                        };
-
-                        let poll = mine.as_mut().poll_consume(
-                            cx,
-                            token.as_context_mut(store),
-                            Source {
-                                id,
-                                host_buffer: host_buffer.as_deref_mut(),
-                            },
-                            cancel,
-                        );
-
-                        if let ReadState::HostReady {
-                            cancel_waker,
-                            cancel,
-                            ..
-                        } = &mut store.concurrent_state_mut()?.get_mut(id)?.read
-                        {
-                            if poll.is_pending() {
-                                *cancel_waker = Some(cx.waker().clone());
-                            } else {
-                                *cancel_waker = None;
-                                *cancel = false;
+                let on_worker = host_buffer.is_none()
+                    && tls::get(|store| consume_needs_worker_fiber(store, id))?;
+                let (result, cancelled) = if on_worker {
+                    // No span named in advance covers what lifting this
+                    // payload reads, so the consumer runs where a missing
+                    // page blocks a fiber rather than failing a copy.
+                    poll_consume_on_worker(token, consumer.clone(), id).await?
+                } else {
+                    let mut mine = consumer.take()?;
+                    let mut residency = ResidencyCheck::default();
+                    future::poll_fn(|cx| {
+                        tls::get(|store| {
+                            // The consumer lifts flat items out of the
+                            // guest's write buffer in this same poll, or
+                            // reads it through a direct view, so whatever is
+                            // left of that buffer must be present first.
+                            if host_buffer.is_none()
+                                && residency
+                                    .poll(cx, store.store_opaque_mut(), |store| {
+                                        guest_write_span(store, id)
+                                    })?
+                                    .is_pending()
+                            {
+                                return Ok(Poll::Pending);
                             }
-                        }
-
-                        Ok(poll.map(|v| v.map(|result| (result, cancel))))
-                    })?
-                })
-                .await?;
+                            poll_consume_once(
+                                mine.as_mut(),
+                                cx,
+                                store,
+                                token,
+                                id,
+                                host_buffer.as_deref_mut(),
+                            )
+                        })?
+                    })
+                    .await?
+                };
 
                 let (guest_offset, count) = tls::get(|store| {
                     let transmit = store.concurrent_state_mut()?.get_mut(id)?;
@@ -3133,8 +3151,36 @@ async fn write<D: 'static, P: Send + 'static, T: func::Lower + 'static, B: Write
                     // Optimize flat payloads (i.e. those which do not
                     // require calling the guest's realloc function) by
                     // lowering directly instead of using a oneshot::channel
-                    // and background task.
-                    tls::get(|store| accept(token.as_context_mut(store)))?
+                    // and background task. The bytes the lower writes are
+                    // known up front, and must be present in the poll that
+                    // writes them.
+                    let items = old_remaining.min(count.as_usize() - guest_offset.as_usize());
+                    let mut residency = ResidencyCheck::default();
+                    future::poll_fn(|cx| {
+                        tls::get(|store| -> Result<Poll<Result<()>>> {
+                            if residency
+                                .poll(cx, store.store_opaque_mut(), |store| {
+                                    let start = T::SIZE32
+                                        .checked_mul(guest_offset.as_usize())
+                                        .and_then(|offset| address.checked_add(offset));
+                                    let len = T::SIZE32.checked_mul(items);
+                                    Ok(start.zip(len).and_then(|(start, len)| {
+                                        guest_span(
+                                            instance.options_memory(store, options),
+                                            start,
+                                            len,
+                                        )
+                                    }))
+                                })?
+                                .is_pending()
+                            {
+                                return Ok(Poll::Pending);
+                            }
+                            accept(token.as_context_mut(store))?;
+                            Ok(Poll::Ready(Ok(())))
+                        })?
+                    })
+                    .await?
                 }
             }
 
@@ -3206,6 +3252,281 @@ async fn write<D: 'static, P: Send + 'static, T: func::Lower + 'static, B: Write
         }
 
         _ => bail_bug!("unexpected read state"),
+    }
+}
+
+/// The guest bytes a host producer can reach through a direct view while it
+/// is polled for transmit `id`: what is left of a guest's read buffer, when
+/// the guest is reading a `stream<u8>`. Every other producer writes into a
+/// host-side buffer, and `write` lowers that with a check of its own.
+fn direct_read_span(
+    store: &mut StoreOpaque,
+    id: TableId<TransmitState>,
+) -> Result<Option<NonNull<[u8]>>> {
+    let transmit = store.concurrent_state_mut()?.get_mut(id)?;
+    let &ReadState::GuestReady {
+        ty,
+        instance,
+        options,
+        address,
+        count,
+        ..
+    } = &transmit.read
+    else {
+        return Ok(None);
+    };
+    let &WriteState::HostReady { guest_offset, .. } = &transmit.write else {
+        bail_bug!("expected WriteState::HostReady")
+    };
+    let types = instance.id().get(store).component().types();
+    if ty.payload(types) != Some(&InterfaceType::U8) {
+        return Ok(None);
+    }
+    Ok(guest_span(
+        instance.options_memory(store, options),
+        address + guest_offset.as_usize(),
+        count.as_usize() - guest_offset.as_usize(),
+    ))
+}
+
+/// The guest bytes a host consumer can reach while it is polled for transmit
+/// `id`: what is left of a guest's write buffer, which is exactly what lifting
+/// flat items or reading a direct view touches.
+fn guest_write_span(
+    store: &mut StoreOpaque,
+    id: TableId<TransmitState>,
+) -> Result<Option<NonNull<[u8]>>> {
+    let transmit = store.concurrent_state_mut()?.get_mut(id)?;
+    let &WriteState::GuestReady {
+        ty,
+        instance,
+        options,
+        address,
+        count,
+        ..
+    } = &transmit.write
+    else {
+        return Ok(None);
+    };
+    let guest_offset = match &transmit.read {
+        &ReadState::HostReady { guest_offset, .. } => guest_offset,
+        ReadState::Open => ItemCount::ZERO,
+        _ => bail_bug!("unexpected read state"),
+    };
+    let types = instance.id().get(store).component().types();
+    let Some(payload) = ty.payload(types) else {
+        return Ok(None);
+    };
+    let size = usize::try_from(types.canonical_abi(payload).size32)?;
+    let start = size
+        .checked_mul(guest_offset.as_usize())
+        .and_then(|offset| address.checked_add(offset));
+    let len = size.checked_mul(count.as_usize() - guest_offset.as_usize());
+    Ok(start
+        .zip(len)
+        .and_then(|(start, len)| guest_span(instance.options_memory(store, options), start, len)))
+}
+
+/// Whether the host consumer of the guest write pending on transmit `id` must
+/// be polled on a worker fiber: the store has a residency hook, and lifting
+/// the payload follows guest pointers to bytes no span named in advance
+/// covers.
+fn consume_needs_worker_fiber(store: &mut StoreOpaque, id: TableId<TransmitState>) -> Result<bool> {
+    if store.component_data().guest_memory_residency.is_none() {
+        return Ok(false);
+    }
+    let &WriteState::GuestReady { ty, instance, .. } =
+        &store.concurrent_state_mut()?.get_mut(id)?.write
+    else {
+        return Ok(false);
+    };
+    let types = instance.id().get(store).component().types();
+    Ok(ty
+        .payload(types)
+        .is_some_and(|payload| payload_holds_pointers(types, payload)))
+}
+
+/// Whether a value of `ty` holds a string or a list anywhere inside it, which
+/// is what makes lifting it read guest memory beyond its own flat bytes.
+fn payload_holds_pointers(types: &ComponentTypes, ty: &InterfaceType) -> bool {
+    match ty {
+        InterfaceType::String | InterfaceType::List(_) | InterfaceType::Map(_) => true,
+        InterfaceType::Record(index) => types[*index]
+            .fields
+            .iter()
+            .any(|field| payload_holds_pointers(types, &field.ty)),
+        InterfaceType::Variant(index) => types[*index]
+            .cases
+            .values()
+            .flatten()
+            .any(|case| payload_holds_pointers(types, case)),
+        InterfaceType::Tuple(index) => types[*index]
+            .types
+            .iter()
+            .any(|ty| payload_holds_pointers(types, ty)),
+        InterfaceType::Option(index) => payload_holds_pointers(types, &types[*index].ty),
+        InterfaceType::Result(index) => {
+            let result = &types[*index];
+            result
+                .ok
+                .iter()
+                .chain(result.err.iter())
+                .any(|ty| payload_holds_pointers(types, ty))
+        }
+        InterfaceType::FixedLengthList(index) => {
+            payload_holds_pointers(types, &types[*index].element)
+        }
+        InterfaceType::Bool
+        | InterfaceType::S8
+        | InterfaceType::U8
+        | InterfaceType::S16
+        | InterfaceType::U16
+        | InterfaceType::S32
+        | InterfaceType::U32
+        | InterfaceType::S64
+        | InterfaceType::U64
+        | InterfaceType::Float32
+        | InterfaceType::Float64
+        | InterfaceType::Char
+        | InterfaceType::Flags(_)
+        | InterfaceType::Enum(_)
+        | InterfaceType::Own(_)
+        | InterfaceType::Borrow(_)
+        | InterfaceType::Future(_)
+        | InterfaceType::Stream(_)
+        | InterfaceType::ErrorContext(_) => false,
+    }
+}
+
+/// One poll of a host consumer for transmit `id`, with the bookkeeping that
+/// lets a cancellation wake it. Yields what the consumer returned alongside
+/// whether it was asked to finish.
+fn poll_consume_once<D: 'static, C: StreamConsumer<D>>(
+    consumer: Pin<&mut C>,
+    cx: &mut Context<'_>,
+    store: &mut dyn VMStore,
+    token: StoreToken<D>,
+    id: TableId<TransmitState>,
+    host_buffer: Option<&mut dyn WriteBuffer<C::Item>>,
+) -> Result<Poll<Result<(StreamResult, bool)>>> {
+    let cancel = match &store.concurrent_state_mut()?.get_mut(id)?.read {
+        &ReadState::HostReady { cancel, .. } => cancel,
+        ReadState::Open => false,
+        _ => bail_bug!("unexpected read state"),
+    };
+
+    let poll = consumer.poll_consume(
+        cx,
+        token.as_context_mut(store),
+        Source { id, host_buffer },
+        cancel,
+    );
+
+    if let ReadState::HostReady {
+        cancel_waker,
+        cancel,
+        ..
+    } = &mut store.concurrent_state_mut()?.get_mut(id)?.read
+    {
+        if poll.is_pending() {
+            *cancel_waker = Some(cx.waker().clone());
+        } else {
+            *cancel_waker = None;
+            *cancel = false;
+        }
+    }
+
+    Ok(poll.map(|v| v.map(|result| (result, cancel))))
+}
+
+/// Drives a host consumer for transmit `id` to completion with every poll of
+/// it made on a worker fiber, where a touch of a missing guest page blocks the
+/// fiber the way a guest's own access does.
+///
+/// Each attempt is one poll, dispatched as a worker function, with a waker of
+/// its own; when the consumer answers `Pending`, the next attempt waits until
+/// that waker has been woken, so a consumer that is waiting on something
+/// costs no fiber switches.
+async fn poll_consume_on_worker<D: 'static, C: StreamConsumer<D>>(
+    token: StoreToken<D>,
+    consumer: Arc<LockedState<Pin<Box<C>>>>,
+    id: TableId<TransmitState>,
+) -> Result<(StreamResult, bool)> {
+    let wake = Arc::new(ConsumerWake::default());
+    loop {
+        // Armed before the attempt is dispatched: a wake the consumer raises
+        // while that poll runs is still seen once the poll says `Pending`.
+        wake.arm();
+        let (tx, rx) = oneshot::channel();
+        let attempt = {
+            let consumer = consumer.clone();
+            let waker = Waker::from(wake.clone());
+            move |store: &mut dyn VMStore| {
+                let mut cx = Context::from_waker(&waker);
+                let poll = tls::set(store, || {
+                    tls::get(|store| {
+                        let mut mine = consumer.take()?;
+                        poll_consume_once(mine.as_mut(), &mut cx, store, token, id, None)
+                    })
+                });
+                _ = tx.send(poll);
+                Ok(())
+            }
+        };
+        tls::get(move |store| {
+            store
+                .concurrent_state_mut()?
+                .push_high_priority(WorkItem::WorkerFunction(AlwaysMut::new(Box::new(attempt))));
+            crate::error::Ok(())
+        })?;
+        match rx.await {
+            Ok(poll) => match poll? {
+                Poll::Ready(outcome) => break outcome,
+                Poll::Pending => future::poll_fn(|cx| wake.poll_woken(cx)).await,
+            },
+            Err(oneshot::Canceled) => bail_bug!("work cancelled"),
+        }
+    }
+}
+
+/// The waker a host consumer polled on a worker fiber is given, which records
+/// that it was woken for the task waiting to dispatch the next poll.
+///
+/// The consumer may wake it from any thread; the waiting task reads it on its
+/// own.
+#[derive(Default)]
+struct ConsumerWake {
+    woken: AtomicBool,
+    waiter: AtomicWaker,
+}
+
+impl ConsumerWake {
+    /// Forgets earlier wakes, before a poll that may raise a new one.
+    fn arm(&self) {
+        self.woken.store(false, Ordering::SeqCst);
+    }
+
+    /// Ready once the consumer has woken this since [`Self::arm`].
+    fn poll_woken(&self, cx: &mut Context<'_>) -> Poll<()> {
+        // Registered before the flag is read, so a wake landing in between
+        // wakes the registration instead of being lost.
+        self.waiter.register(cx.waker());
+        if self.woken.load(Ordering::SeqCst) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Wake for ConsumerWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, Ordering::SeqCst);
+        self.waiter.wake();
     }
 }
 
