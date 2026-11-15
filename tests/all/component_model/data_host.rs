@@ -1,5 +1,5 @@
 use wasmtime::component::{Component, Linker, Resource, ResourceType};
-use wasmtime::{Config, Engine, Result, Store};
+use wasmtime::{Config, Engine, Result, Store, Trap};
 
 mod generated {
     wasmtime::component::bindgen!({
@@ -100,19 +100,30 @@ fn data_host_scalar_traps_preserve_the_error() -> Result<()> {
     for concurrent in [false, true] {
         let engine = engine(concurrent)?;
         let component = Component::new(&engine, include_str!("data-host.wat"))?;
-        let mut linker = Linker::<()>::new(&engine);
-        linker
-            .root()
-            .func_wrap_data("increment", |_, (_n,): (u32,)| -> Result<(u32,)> {
-                Err(wasmtime::Error::msg("data host trap"))
-            })?;
-        let mut store = Store::new(&engine, ());
-        let instance = linker.instantiate(&mut store, &component)?;
-        let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
-        let error = run.call(&mut store, (7,)).expect_err("host traps");
-        assert!(format!("{error:#}").contains("data host trap"));
-        if concurrent {
-            store.assert_concurrent_state_empty();
+        for data_only in [false, true] {
+            let mut linker = Linker::<()>::new(&engine);
+            if data_only {
+                linker.root().func_wrap_data(
+                    "increment",
+                    |_, (_n,): (u32,)| -> Result<(u32,)> {
+                        Err(wasmtime::Error::msg("data host trap"))
+                    },
+                )?;
+            } else {
+                linker
+                    .root()
+                    .func_wrap("increment", |_, (_n,): (u32,)| -> Result<(u32,)> {
+                        Err(wasmtime::Error::msg("data host trap"))
+                    })?;
+            }
+            let mut store = Store::new(&engine, ());
+            let instance = linker.instantiate(&mut store, &component)?;
+            let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+            let error = run.call(&mut store, (7,)).expect_err("host traps");
+            assert!(format!("{error:#}").contains("data host trap"));
+            // A component trap poisons the store rather than completing its tasks.
+            let error = run.call(&mut store, (7,)).expect_err("store is poisoned");
+            assert_eq!(error.downcast_ref(), Some(&Trap::CannotEnterComponent));
         }
     }
     Ok(())
