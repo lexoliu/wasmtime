@@ -204,6 +204,44 @@ impl HostFunc {
         )
     }
 
+    /// Prepare borrowed inputs synchronously before creating the host future.
+    #[cfg(feature = "component-model-async")]
+    pub(crate) fn func_wrap_concurrent_prepare<T, Prepare, F, P, Prepared, R>(
+        prepare: Prepare,
+        func: F,
+    ) -> Result<Arc<HostFunc>>
+    where
+        T: 'static,
+        Prepare: Fn(&mut T, HostMemory<'_>, P) -> Result<Prepared> + Send + Sync + 'static,
+        F: Fn(&Accessor<T>, Prepared) -> Pin<Box<dyn Future<Output = Result<R>> + Send + '_>>
+            + Send
+            + Sync
+            + 'static,
+        P: ComponentNamedList + Lift + 'static,
+        Prepared: Send + Sync + 'static,
+        R: ComponentNamedList + Lower + 'static,
+    {
+        let func = Arc::new(func);
+        Self::new(
+            Asyncness::Yes,
+            StaticHostFn::<_, true>::new(move |store: StoreContextMut<'_, T>, params| {
+                let prepared = {
+                    let (data, opaque) = store.0.data_and_opaque();
+                    prepare(data, HostMemory { store: opaque }, params)
+                };
+                match prepared {
+                    Err(error) => HostResult::Done(Err(error)),
+                    Ok(prepared) => {
+                        let func = func.clone();
+                        HostResult::Future(Box::pin(
+                            store.wrap_call(move |accessor| func(accessor, prepared)),
+                        ))
+                    }
+                }
+            }),
+        )
+    }
+
     /// Equivalent of `Linker::func_new`
     pub(crate) fn func_new<T, F>(func: F) -> Result<Arc<HostFunc>>
     where

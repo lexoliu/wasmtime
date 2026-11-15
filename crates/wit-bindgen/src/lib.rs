@@ -30,6 +30,7 @@ macro_rules! uwriteln {
 }
 
 mod config;
+mod host_input;
 mod rust;
 mod source;
 mod types;
@@ -74,6 +75,7 @@ struct Wasmtime {
     interfaces_for_implements: HashMap<InterfaceId, InterfaceId>,
     exports: Exports,
     types: Types,
+    borrowed_input_types: HashSet<TypeId>,
     sizes: SizeAlign,
     interface_names: HashMap<InterfaceId, InterfaceName>,
     trappable_errors: IndexMap<TypeId, String>,
@@ -366,9 +368,16 @@ impl Wasmtime {
             };
             for (namespace, func) in functions {
                 let flags = self.opts.imports.flags(resolve, namespace, func);
+                if flags.contains(FunctionFlags::BORROWED) {
+                    let mut live = LiveTypes::default();
+                    for param in &func.params {
+                        live.add_type(resolve, &param.ty);
+                    }
+                    self.borrowed_input_types.extend(live.iter());
+                }
                 if flags.contains(FunctionFlags::BORROWED)
-                    && (func.kind.is_async()
-                        || flags.intersects(FunctionFlags::ASYNC | FunctionFlags::STORE))
+                    && !func.kind.is_async()
+                    && flags.intersects(FunctionFlags::ASYNC | FunctionFlags::STORE)
                 {
                     anyhow::bail!(
                         "`borrowed` requires a synchronous host without `store`: {}",
@@ -1825,6 +1834,9 @@ impl<'a> InterfaceGenerator<'a> {
                 self.type_fixed_length_list(id, name, elem, *size, &ty.docs)
             }
         }
+        if self.generator.borrowed_input_types.contains(&id) {
+            self.define_host_input(id);
+        }
     }
 
     fn type_handle(&mut self, id: TypeId, name: &str, handle: &Handle, docs: &Docs) {
@@ -2735,7 +2747,9 @@ pub fn add_to_linker<T, D>(
         uwrite!(
             self.src,
             "{linker}.{}(\"{}\", ",
-            if flags.contains(FunctionFlags::BORROWED) {
+            if flags.contains(FunctionFlags::BORROWED) && func.kind.is_async() {
+                "func_wrap_concurrent_prepare"
+            } else if flags.contains(FunctionFlags::BORROWED) {
                 "func_wrap_data_memory"
             } else if func.kind.is_async() && flags.contains(FunctionFlags::IMMEDIATE) {
                 "func_wrap_concurrent_immediate"
@@ -2750,6 +2764,10 @@ pub fn add_to_linker<T, D>(
             },
             func.name
         );
+        if flags.contains(FunctionFlags::BORROWED) && func.kind.is_async() {
+            self.generate_host_input_prepare(owner, func, flags);
+            self.src.push_str(", ");
+        }
         if self.named_import_id.is_some() {
             self.src.push_str("{ let id = id.clone(); ");
         }
@@ -2773,33 +2791,43 @@ pub fn add_to_linker<T, D>(
         let data_only =
             !func.kind.is_async() && !flags.intersects(FunctionFlags::ASYNC | FunctionFlags::STORE);
         let wt = self.generator.wasmtime_path();
-        if func.kind.is_async() && !flags.contains(FunctionFlags::IMMEDIATE) {
-            uwrite!(self.src, "move |caller: &{wt}::component::Accessor::<T>, (");
-        } else if flags.contains(FunctionFlags::BORROWED) {
+        let prepared = func.kind.is_async() && flags.contains(FunctionFlags::BORROWED);
+        if prepared {
+            let host_trait = self.host_input_trait(owner, func);
+            let input = Self::host_prepared_name(func);
             uwrite!(
                 self.src,
-                "move |caller: &mut T, _memory: {wt}::component::HostMemory<'_>, ("
+                "move |caller: &{wt}::component::Accessor::<T>, prepared: <D as {host_trait}WithStore<T>>::{input}| {{\n"
             );
-        } else if data_only {
-            uwrite!(self.src, "move |caller: &mut T, (");
         } else {
-            uwrite!(
-                self.src,
-                "move |mut caller: {wt}::StoreContextMut<'_, T>, ("
-            );
-        }
-        for (i, _param) in func.params.iter().enumerate() {
-            uwrite!(self.src, "arg{},", i);
-        }
-        self.src.push_str(") : (");
+            if func.kind.is_async() && !flags.contains(FunctionFlags::IMMEDIATE) {
+                uwrite!(self.src, "move |caller: &{wt}::component::Accessor::<T>, (");
+            } else if flags.contains(FunctionFlags::BORROWED) {
+                uwrite!(
+                    self.src,
+                    "move |caller: &mut T, _memory: {wt}::component::HostMemory<'_>, ("
+                );
+            } else if data_only {
+                uwrite!(self.src, "move |caller: &mut T, (");
+            } else {
+                uwrite!(
+                    self.src,
+                    "move |mut caller: {wt}::StoreContextMut<'_, T>, ("
+                );
+            }
+            for (i, _param) in func.params.iter().enumerate() {
+                uwrite!(self.src, "arg{},", i);
+            }
+            self.src.push_str(") : (");
 
-        for param in func.params.iter() {
-            self.print_import_param(&param.ty, flags, true);
-            self.src.push_str(", ");
+            for param in func.params.iter() {
+                self.print_import_param(&param.ty, flags, true);
+                self.src.push_str(", ");
+            }
+            self.src.push_str(")| {\n");
         }
-        self.src.push_str(")| {\n");
 
-        if flags.contains(FunctionFlags::BORROWED) {
+        if flags.contains(FunctionFlags::BORROWED) && !prepared {
             for (i, param) in func.params.iter().enumerate() {
                 match self.direct_borrowed_type(&param.ty) {
                     Some(Type::String) => {
@@ -2807,7 +2835,10 @@ pub fn add_to_linker<T, D>(
                         uwriteln!(self.src, "let arg{i} = arg{i}.as_ref();");
                     }
                     Some(_) => uwriteln!(self.src, "let arg{i} = arg{i}.as_le_slice_in(_memory);"),
-                    None => {}
+                    None => {
+                        let value = self.host_input_value(&param.ty, &format!("arg{i}"));
+                        uwriteln!(self.src, "let arg{i} = {value};");
+                    }
                 }
             }
         }
@@ -2861,7 +2892,7 @@ pub fn add_to_linker<T, D>(
             }
         }
 
-        if flags.contains(FunctionFlags::TRACING) {
+        if flags.contains(FunctionFlags::TRACING) && !prepared {
             let mut event_fields = func
                 .params
                 .iter()
@@ -2931,8 +2962,12 @@ pub fn add_to_linker<T, D>(
             self.src.push_str("id, ");
         }
 
-        for (i, _) in func.params.iter().enumerate() {
-            uwrite!(self.src, "arg{},", i);
+        if prepared {
+            self.src.push_str("prepared,");
+        } else {
+            for (i, _) in func.params.iter().enumerate() {
+                uwrite!(self.src, "arg{},", i);
+            }
         }
 
         self.src.push_str(if flags.contains(FunctionFlags::ASYNC) {
@@ -3004,6 +3039,19 @@ pub fn add_to_linker<T, D>(
     fn generate_function_trait_sig(&mut self, func: &Function, flags: FunctionFlags) {
         let wt = self.generator.wasmtime_path();
         self.rustdoc(&func.docs);
+        let prepared = func.kind.is_async() && flags.contains(FunctionFlags::BORROWED);
+        if prepared {
+            let input = Self::host_prepared_name(func);
+            let name = rust_function_name(func);
+            let name = name.trim_start_matches("r#");
+            uwriteln!(self.src, "type {input}: Send + Sync + 'static;");
+            uwrite!(self.src, "fn prepare_{name}(host: &mut Self::Data<'_>, ");
+            if let Some(id) = &self.named_import_id {
+                uwrite!(self.src, "id: {id}, ");
+            }
+            self.generate_function_params(func, flags);
+            uwriteln!(self.src, ") -> {wt}::Result<Self::{input}>;");
+        }
 
         self.push_str("fn ");
         self.push_str(&rust_function_name(func));
@@ -3017,7 +3065,12 @@ pub fn add_to_linker<T, D>(
         if let Some(id) = &self.named_import_id {
             uwrite!(self.src, "id: {id}, ");
         }
-        self.generate_function_params(func, flags);
+        if prepared {
+            let input = Self::host_prepared_name(func);
+            uwrite!(self.src, "prepared: Self::{input}");
+        } else {
+            self.generate_function_params(func, flags);
+        }
         self.push_str(")");
         self.push_str(" -> ");
 
@@ -3078,6 +3131,9 @@ pub fn add_to_linker<T, D>(
                 }
                 return;
             }
+            let ty = self.host_input_ty(ty, cursor, "'_");
+            self.push_str(&ty);
+            return;
         }
         self.print_ty(ty, TypeMode::Owned);
     }
