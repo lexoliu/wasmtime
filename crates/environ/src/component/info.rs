@@ -49,6 +49,7 @@
 use crate::component::*;
 use crate::prelude::*;
 use crate::{EntityIndex, ModuleInternedTypeIndex, PrimaryMap, Trap, WasmValType};
+use alloc::collections::BTreeMap;
 use cranelift_entity::packed_option::PackedOption;
 use serde_derive::{Deserialize, Serialize};
 
@@ -162,6 +163,10 @@ pub struct Component {
 
     /// WebAssembly type signature of all trampolines.
     pub trampolines: TryPrimaryMap<TrampolineIndex, ModuleInternedTypeIndex>,
+
+    /// Host imports behind lower-import trampolines, for selecting a typed
+    /// register entrypoint when instantiating an ahead-of-time component.
+    pub trampoline_lowerings: BTreeMap<TrampolineIndex, (LoweredIndex, RuntimeImportIndex)>,
 
     /// A map from a `UnsafeIntrinsic::index()` to that intrinsic's
     /// module-interned type.
@@ -1289,4 +1294,61 @@ impl Trampoline {
             ThreadYieldThenPromote { .. } => format!("thread-yield-then-promote"),
         }
     }
+}
+
+#[cfg(feature = "compile")]
+impl ComponentTranslation {
+    /// Whether a lower-import has a flat scalar signature for the register ABI.
+    pub fn has_register_signature(
+        &self,
+        index: TrampolineIndex,
+        types: &ComponentTypesBuilder,
+    ) -> bool {
+        let Trampoline::LowerImport {
+            options, lower_ty, ..
+        } = self.trampolines[index]
+        else {
+            return false;
+        };
+        let function = &types[lower_ty];
+        let scalar = |ty: &InterfaceType| {
+            matches!(
+                ty,
+                InterfaceType::Bool
+                    | InterfaceType::S8
+                    | InterfaceType::U8
+                    | InterfaceType::S16
+                    | InterfaceType::U16
+                    | InterfaceType::S32
+                    | InterfaceType::U32
+                    | InterfaceType::S64
+                    | InterfaceType::U64
+                    | InterfaceType::Float32
+                    | InterfaceType::Float64
+                    | InterfaceType::Char
+                    | InterfaceType::Own(_)
+                    | InterfaceType::Borrow(_)
+                    | InterfaceType::Enum(_)
+            )
+        };
+        !function.async_
+            && !self.component.options[options].async_
+            && types[function.params].types.len() <= MAX_FLAT_PARAMS
+            && types[function.results].types.len() <= MAX_FLAT_RESULTS
+            && types[function.params].types.iter().all(scalar)
+            && types[function.results].types.iter().all(scalar)
+    }
+}
+
+/// Targets whose C ABI returns a pair of integer machine words in registers.
+/// The scalar host ABI uses a `repr(C)` pair for the value and trap status.
+#[cfg(feature = "compile")]
+pub fn supports_register_host_abi(triple: &target_lexicon::Triple) -> bool {
+    use target_lexicon::{Architecture, Endianness, OperatingSystem};
+    triple.operating_system != OperatingSystem::Windows
+        && triple.endianness() == Ok(Endianness::Little)
+        && matches!(
+            triple.architecture,
+            Architecture::X86_64 | Architecture::Aarch64(_) | Architecture::Riscv64(_)
+        )
 }

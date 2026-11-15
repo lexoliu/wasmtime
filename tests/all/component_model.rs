@@ -25,6 +25,7 @@ mod map;
 mod missing_async;
 mod nested;
 mod post_return;
+mod register_host;
 mod resources;
 mod stream_contract;
 mod stream_sync_dropped;

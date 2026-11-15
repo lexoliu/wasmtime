@@ -545,6 +545,20 @@ impl Component {
         }
     }
 
+    pub(crate) fn register_trampoline_ptrs(
+        &self,
+        index: TrampolineIndex,
+    ) -> Option<AllCallFuncPointers> {
+        Some(AllCallFuncPointers {
+            wasm_call: self
+                .store_invariant_func(FuncKey::ComponentRegisterTrampoline(Abi::Wasm, index))?
+                .cast(),
+            array_call: self
+                .store_invariant_func(FuncKey::ComponentRegisterTrampoline(Abi::Array, index))?
+                .cast(),
+        })
+    }
+
     pub(crate) fn unsafe_intrinsic_ptrs(
         &self,
         intrinsic: UnsafeIntrinsic,

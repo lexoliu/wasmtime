@@ -1026,6 +1026,95 @@ impl<'a> TrampolineCompiler<'a> {
         }
     }
 
+    fn translate_register_hostcall(&mut self, trampoline: &Trampoline) {
+        self.check_may_leave(trampoline);
+        let Trampoline::LowerImport {
+            index,
+            options,
+            lower_ty,
+        } = *trampoline
+        else {
+            unreachable!();
+        };
+        let params = self.abi_load_params();
+        let vmctx = params[0];
+        let data = self
+            .alias_regions
+            .vmcomponent_lowering_data(index)
+            .load(&mut self.builder.cursor(), vmctx);
+        let mut args = vec![
+            vmctx,
+            data,
+            self.index_value(lower_ty),
+            self.index_value(options),
+        ];
+        for value in &params[2..] {
+            let value = match self.builder.func.dfg.value_type(*value) {
+                ir::types::I32 => self.builder.ins().uextend(ir::types::I64, *value),
+                ir::types::I64 => *value,
+                ir::types::F32 => {
+                    let bits =
+                        self.builder
+                            .ins()
+                            .bitcast(ir::types::I32, ir::MemFlagsData::new(), *value);
+                    self.builder.ins().uextend(ir::types::I64, bits)
+                }
+                ir::types::F64 => {
+                    self.builder
+                        .ins()
+                        .bitcast(ir::types::I64, ir::MemFlagsData::new(), *value)
+                }
+                _ => unreachable!(),
+            };
+            args.push(value);
+        }
+        let callee = self
+            .alias_regions
+            .vmcomponent_lowering_callee(index)
+            .load(&mut self.builder.cursor(), vmctx);
+        let mut signature = ir::Signature::new(CallConv::triple_default(self.isa.triple()));
+        for arg in &args {
+            signature
+                .params
+                .push(ir::AbiParam::new(self.builder.func.dfg.value_type(*arg)));
+        }
+        // VMLoweringRegisterResult is the C ABI pair { bits: u64, success: u64 }.
+        signature
+            .returns
+            .extend([ir::AbiParam::new(ir::types::I64); 2]);
+        let signature = self.builder.import_signature(signature);
+        let call = self.compiler.call_indirect_host(
+            &mut self.builder,
+            HostCall::ComponentLowerImport,
+            signature,
+            callee,
+            &args,
+        );
+        let bits = self.builder.func.dfg.inst_results(call)[0];
+        let success = self.builder.func.dfg.inst_results(call)[1];
+        self.raise_if_host_trapped(success);
+        let result = match self.signature.results() {
+            [] => None,
+            [WasmValType::I32] => Some(self.builder.ins().ireduce(ir::types::I32, bits)),
+            [WasmValType::I64] => Some(bits),
+            [WasmValType::F32] => {
+                let bits = self.builder.ins().ireduce(ir::types::I32, bits);
+                Some(
+                    self.builder
+                        .ins()
+                        .bitcast(ir::types::F32, ir::MemFlagsData::new(), bits),
+                )
+            }
+            [WasmValType::F64] => Some(self.builder.ins().bitcast(
+                ir::types::F64,
+                ir::MemFlagsData::new(),
+                bits,
+            )),
+            _ => unreachable!(),
+        };
+        self.abi_store_results(result.as_slice());
+    }
+
     fn index_value(&mut self, index: impl EntityRef) -> ir::Value {
         self.builder
             .ins()
@@ -1636,6 +1725,7 @@ impl ComponentCompiler for Compiler {
         symbol: &str,
     ) -> Result<CompiledFunctionBody> {
         let (abi2, trampoline_index) = key.unwrap_component_trampoline();
+        let register = matches!(key, FuncKey::ComponentRegisterTrampoline(..));
         debug_assert_eq!(abi, abi2);
         let sig = types[component.component.trampolines[trampoline_index]].unwrap_func();
 
@@ -1648,7 +1738,11 @@ impl ComponentCompiler for Compiler {
             Abi::Array => {
                 return Ok(self.array_to_wasm_trampoline(
                     key,
-                    FuncKey::ComponentTrampoline(Abi::Wasm, trampoline_index),
+                    if register {
+                        FuncKey::ComponentRegisterTrampoline(Abi::Wasm, trampoline_index)
+                    } else {
+                        FuncKey::ComponentTrampoline(Abi::Wasm, trampoline_index)
+                    },
                     sig,
                     symbol,
                     wasmtime_environ::component::VMCOMPONENT_MAGIC,
@@ -1690,7 +1784,13 @@ impl ComponentCompiler for Compiler {
             vm_store_context,
         );
 
-        c.translate(&component.trampolines[trampoline_index]);
+        if register {
+            assert!(component.has_register_signature(trampoline_index, types));
+            assert!(supports_register_host_abi(self.isa.triple()));
+            c.translate_register_hostcall(&component.trampolines[trampoline_index]);
+        } else {
+            c.translate(&component.trampolines[trampoline_index]);
+        }
         c.builder.finalize(c.isa.frontend_config());
         crate::alias_region::debug_assert_all_mem_insts_have_alias_regions(
             &compiler.cx.codegen_context.func,
