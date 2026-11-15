@@ -345,41 +345,61 @@ async fn data_host_cancelled_preparation_releases_owned_request() -> Result<()> 
             self.drops.fetch_add(1, Ordering::SeqCst);
         }
     }
-    let mut config = Config::new();
-    config.wasm_component_model_async(true);
-    let engine = Engine::new(&config)?;
-    let component = Component::new(&engine, include_str!("data-host-prepare.wat"))?;
-    let drops = Arc::new(AtomicUsize::new(0));
-    let mut linker = Linker::<Arc<AtomicUsize>>::new(&engine);
-    linker.root().func_wrap_concurrent_prepare(
-        "inspect",
-        |drops, memory, (text, bytes): (WasmStr, WasmList<u8>)| {
+    for sync_wit in [false, true] {
+        let mut config = Config::new();
+        config.wasm_component_model_async(true);
+        let engine = Engine::new(&config)?;
+        let component = Component::new(
+            &engine,
+            if sync_wit {
+                include_str!("data-host-memory.wat")
+            } else {
+                include_str!("data-host-prepare.wat")
+            },
+        )?;
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut linker = Linker::<Arc<AtomicUsize>>::new(&engine);
+        let prepare = |drops: &mut Arc<AtomicUsize>,
+                       memory: wasmtime::component::HostMemory<'_>,
+                       (text, bytes): (WasmStr, WasmList<u8>)| {
             let text = text.to_str_in(memory)?.into_owned();
             assert!(!bytes.as_le_slice_in(memory).is_empty());
             Ok(Request {
                 text,
                 drops: drops.clone(),
             })
-        },
-        |_, request| {
-            Box::pin(async move {
-                std::future::pending::<()>().await;
-                Ok((request.text.len() as u32,))
-            })
-        },
-    )?;
-    let mut store = Store::new(&engine, drops.clone());
-    let instance = linker.instantiate_async(&mut store, &component).await?;
-    let run = instance.get_typed_func::<(u32, u32), (u32,)>(&mut store, "utf8")?;
-    let pending = PollOnce::new(Box::pin(
-        run.call_async(&mut store, (0, "中文、日本語、한국어".len() as u32)),
-    ))
-    .await;
-    assert!(pending.is_err());
-    assert_eq!(drops.load(Ordering::SeqCst), 0);
-    drop(pending);
-    drop(store);
-    assert_eq!(drops.load(Ordering::SeqCst), 1);
+        };
+        let execute =
+            |request: Request| -> Box<dyn std::future::Future<Output = Result<(u32,)>> + Send> {
+                Box::new(async move {
+                    std::future::pending::<()>().await;
+                    Ok((request.text.len() as u32,))
+                })
+            };
+        if sync_wit {
+            linker
+                .root()
+                .func_wrap_async_prepare("inspect", prepare, move |_, request| execute(request))?;
+        } else {
+            linker
+                .root()
+                .func_wrap_concurrent_prepare("inspect", prepare, move |_, request| {
+                    Box::into_pin(execute(request))
+                })?;
+        }
+        let mut store = Store::new(&engine, drops.clone());
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let run = instance.get_typed_func::<(u32, u32), (u32,)>(&mut store, "utf8")?;
+        let pending = PollOnce::new(Box::pin(
+            run.call_async(&mut store, (0, "中文、日本語、한국어".len() as u32)),
+        ))
+        .await;
+        assert!(pending.is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(pending);
+        drop(store);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
     Ok(())
 }
 
@@ -479,5 +499,68 @@ async fn data_host_guest_cancellation_releases_prepared_request() -> Result<()> 
     store.assert_concurrent_state_empty();
     assert_eq!(prepared.load(Ordering::SeqCst), 1);
     assert_eq!(Arc::strong_count(&prepared), 2);
+    Ok(())
+}
+
+mod borrowed_sync_wit_async_host {
+    wasmtime::component::bindgen!({
+        path: "tests/all/component_model/data-host-memory.wit",
+        imports: { default: borrowed | async | trappable },
+    });
+    impl BorrowedHostImports for u32 {}
+    impl<T: Send> BorrowedHostImportsWithStore<T> for wasmtime::component::HasSelf<u32> {
+        type InspectPrepared = String;
+        fn prepare_inspect(
+            host: &mut &mut u32,
+            text: &str,
+            bytes: &[u8],
+        ) -> wasmtime::Result<String> {
+            assert_eq!(text, "中文、日本語、한국어");
+            if text.len() == bytes.len() {
+                assert_eq!(text.as_ptr(), bytes.as_ptr());
+            }
+            **host += 1;
+            Ok(text.to_owned())
+        }
+        async fn inspect(
+            _host: wasmtime::component::Access<'_, T, Self>,
+            prepared: String,
+        ) -> wasmtime::Result<u32> {
+            tokio::task::yield_now().await;
+            Ok(prepared.len() as u32)
+        }
+    }
+}
+
+#[tokio::test]
+async fn data_host_sync_wit_async_preparation_validates_before_suspending() -> Result<()> {
+    for concurrent in [false, true] {
+        let engine = engine(concurrent)?;
+        let component = Component::new(&engine, include_str!("data-host-memory.wat"))?;
+        let mut linker = Linker::<u32>::new(&engine);
+        borrowed_sync_wit_async_host::BorrowedHost::add_to_linker::<
+            _,
+            wasmtime::component::HasSelf<u32>,
+        >(&mut linker, |data| data)?;
+        for (export, ptr, len, valid) in [
+            ("utf8", 0, "中文、日本語、한국어".len() as u32, true),
+            ("utf16", 128, 10, true),
+            ("utf8", 127, 1, false),
+            ("utf8", 65535, 2, false),
+        ] {
+            let mut store = Store::new(&engine, 0);
+            let instance = linker.instantiate_async(&mut store, &component).await?;
+            let run = instance.get_typed_func::<(u32, u32), (u32,)>(&mut store, export)?;
+            let result = run.call_async(&mut store, (ptr, len)).await;
+            assert_eq!(result.is_ok(), valid, "{result:?}");
+            assert_eq!(*store.data(), u32::from(valid));
+            if valid {
+                assert_eq!(result?, ("中文、日本語、한국어".len() as u32,));
+                if concurrent {
+                    store.assert_concurrent_state_empty();
+                }
+            }
+        }
+    }
     Ok(())
 }
