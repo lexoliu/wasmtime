@@ -184,10 +184,10 @@ const _: () = {
         {
             let mut linker = linker.root();
             linker
-                .func_wrap(
+                .func_wrap_data(
                     "foo",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = FooImports::foo(host);
                         Ok(r)
                     },

@@ -329,6 +329,16 @@ pub(crate) use self::store::ComponentStoreData;
 ///         //
 ///         // "my:local/api.immediate-operation": immediate | trappable,
 ///
+///         // `borrowed` gives a synchronous host direct string and byte-list
+///         // inputs as `&str` and `&[u8]`, including type aliases. The host
+///         // cannot access the store or suspend while these inputs are live.
+///         // UTF-8 strings and bytes borrow guest memory; other string
+///         // encodings are decoded before calling the host. Validation runs
+///         // even when the host ignores its arguments. Results remain owned.
+///         // This import-only flag cannot be combined with `async` or `store`.
+///         //
+///         // "my:local/api.inspect": borrowed | trappable,
+///
 ///         // The `tracing` flag indicates that `tracing!` will be used to log
 ///         // entries and exits into this host API. This can assist with
 ///         // debugging or just generally be used to provide logs for the host.

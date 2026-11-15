@@ -297,10 +297,10 @@ pub mod http_fetch {
         for<'a> D::Data<'a>: Host,
         T: 'static,
     {
-        inst.func_wrap(
+        inst.func_wrap_data(
             "fetch-request",
-            move |mut caller: wasmtime::StoreContextMut<'_, T>, (arg0,): (Request,)| {
-                let host = &mut host_getter(caller.data_mut());
+            move |caller: &mut T, (arg0,): (Request,)| {
+                let host = &mut host_getter(caller);
                 let r = Host::fetch_request(host, arg0);
                 Ok((r,))
             },
