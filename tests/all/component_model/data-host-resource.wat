@@ -1,0 +1,21 @@
+(component
+  (import "item" (type $item (sub resource)))
+  (import "inspect" (func $inspect (param "item" (borrow $item))))
+  (import "increment" (func $increment (param "n" u32) (result u32)))
+  (core func $inspect (canon lower (func $inspect)))
+  (core func $increment (canon lower (func $increment)))
+  (core func $drop (canon resource.drop $item))
+  (core module $m
+    (import "" "drop" (func $drop (param i32)))
+    (import "" "inspect" (func $inspect (param i32)))
+    (import "" "increment" (func $increment (param i32) (result i32)))
+    (func (export "run") (param i32)
+      (call $inspect (local.get 0))
+      (drop (call $increment (i32.const 7)))
+      (call $drop (local.get 0))))
+  (core instance $i (instantiate $m (with "" (instance
+    (export "inspect" (func $inspect))
+    (export "increment" (func $increment))
+    (export "drop" (func $drop))))))
+  (func (export "run") (param "item" (borrow $item))
+    (canon lift (core func $i "run"))))

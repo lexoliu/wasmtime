@@ -526,6 +526,14 @@ pub unsafe trait ComponentType: Send + Sync {
     #[doc(hidden)]
     const MAY_REQUIRE_REALLOC: bool = true;
 
+    /// Whether lifting or lowering may access component resource/task state.
+    ///
+    /// Setting this to false is part of the unsafe `ComponentType` contract:
+    /// the associated `Lift` and `Lower` implementations must not access that
+    /// state. Unknown types conservatively retain a host task.
+    #[doc(hidden)]
+    const MAY_REQUIRE_RESOURCE: bool = true;
+
     /// Returns the number of core wasm abi values will be used to represent
     /// this type in its lowered form.
     ///
@@ -758,6 +766,7 @@ macro_rules! forward_type_impls {
 
             const ABI: CanonicalAbiInfo = <$b as ComponentType>::ABI;
             const MAY_REQUIRE_REALLOC: bool = <$b as ComponentType>::MAY_REQUIRE_REALLOC;
+            const MAY_REQUIRE_RESOURCE: bool = <$b as ComponentType>::MAY_REQUIRE_RESOURCE;
 
             #[inline]
             fn typecheck(ty: &InterfaceType, types: &InstanceType<'_>) -> Result<()> {
@@ -891,6 +900,7 @@ macro_rules! integers {
             const ABI: CanonicalAbiInfo = CanonicalAbiInfo::$abi;
 
             const MAY_REQUIRE_REALLOC: bool = false;
+            const MAY_REQUIRE_RESOURCE: bool = false;
 
             fn typecheck(ty: &InterfaceType, _types: &InstanceType<'_>) -> Result<()> {
                 match ty {
@@ -1019,6 +1029,7 @@ macro_rules! floats {
 
             const ABI: CanonicalAbiInfo = CanonicalAbiInfo::$abi;
             const MAY_REQUIRE_REALLOC: bool = false;
+            const MAY_REQUIRE_RESOURCE: bool = false;
 
             fn typecheck(ty: &InterfaceType, _types: &InstanceType<'_>) -> Result<()> {
                 match ty {
@@ -1138,6 +1149,7 @@ unsafe impl ComponentType for bool {
 
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::SCALAR1;
     const MAY_REQUIRE_REALLOC: bool = false;
+    const MAY_REQUIRE_RESOURCE: bool = false;
 
     fn typecheck(ty: &InterfaceType, _types: &InstanceType<'_>) -> Result<()> {
         match ty {
@@ -1205,6 +1217,7 @@ unsafe impl ComponentType for char {
 
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::SCALAR4;
     const MAY_REQUIRE_REALLOC: bool = false;
+    const MAY_REQUIRE_RESOURCE: bool = false;
 
     fn typecheck(ty: &InterfaceType, _types: &InstanceType<'_>) -> Result<()> {
         match ty {
@@ -1317,6 +1330,7 @@ const MAX_STRING_BYTE_LENGTH: usize = (1 << 31) - 1;
 unsafe impl ComponentType for str {
     type Lower = [ValRaw; 2];
 
+    const MAY_REQUIRE_RESOURCE: bool = false;
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::POINTER_PAIR;
 
     fn typecheck(ty: &InterfaceType, _types: &InstanceType<'_>) -> Result<()> {
@@ -1616,6 +1630,7 @@ impl WasmStr {
 unsafe impl ComponentType for WasmStr {
     type Lower = <str as ComponentType>::Lower;
 
+    const MAY_REQUIRE_RESOURCE: bool = false;
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::POINTER_PAIR;
 
     fn typecheck(ty: &InterfaceType, _types: &InstanceType<'_>) -> Result<()> {
@@ -1657,6 +1672,7 @@ where
 {
     type Lower = [ValRaw; 2];
 
+    const MAY_REQUIRE_RESOURCE: bool = T::MAY_REQUIRE_RESOURCE;
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::POINTER_PAIR;
 
     fn typecheck(ty: &InterfaceType, types: &InstanceType<'_>) -> Result<()> {
@@ -1906,6 +1922,7 @@ raw_wasm_list_accessors! {
 unsafe impl<T: ComponentType> ComponentType for WasmList<T> {
     type Lower = <[T] as ComponentType>::Lower;
 
+    const MAY_REQUIRE_RESOURCE: bool = T::MAY_REQUIRE_RESOURCE;
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::POINTER_PAIR;
 
     fn typecheck(ty: &InterfaceType, types: &InstanceType<'_>) -> Result<()> {
@@ -1962,6 +1979,7 @@ where
 {
     type Lower = [ValRaw; 2];
 
+    const MAY_REQUIRE_RESOURCE: bool = K::MAY_REQUIRE_RESOURCE || V::MAY_REQUIRE_RESOURCE;
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::POINTER_PAIR;
 
     fn typecheck(ty: &InterfaceType, types: &InstanceType<'_>) -> Result<()> {
@@ -2061,6 +2079,7 @@ where
 {
     type Lower = [ValRaw; 2];
 
+    const MAY_REQUIRE_RESOURCE: bool = K::MAY_REQUIRE_RESOURCE || V::MAY_REQUIRE_RESOURCE;
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::POINTER_PAIR;
 
     fn typecheck(ty: &InterfaceType, types: &InstanceType<'_>) -> Result<()> {
@@ -2366,6 +2385,7 @@ where
 
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::variant_static(&[None, Some(T::ABI)]);
     const MAY_REQUIRE_REALLOC: bool = T::MAY_REQUIRE_REALLOC;
+    const MAY_REQUIRE_RESOURCE: bool = T::MAY_REQUIRE_RESOURCE;
 
     fn typecheck(ty: &InterfaceType, types: &InstanceType<'_>) -> Result<()> {
         match ty {
@@ -2508,6 +2528,7 @@ where
 
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::variant_static(&[Some(T::ABI), Some(E::ABI)]);
     const MAY_REQUIRE_REALLOC: bool = T::MAY_REQUIRE_REALLOC || E::MAY_REQUIRE_REALLOC;
+    const MAY_REQUIRE_RESOURCE: bool = T::MAY_REQUIRE_RESOURCE || E::MAY_REQUIRE_RESOURCE;
 
     fn typecheck(ty: &InterfaceType, types: &InstanceType<'_>) -> Result<()> {
         match ty {
@@ -2866,6 +2887,7 @@ macro_rules! impl_component_ty_for_tuples {
                 $($t::ABI),*
             ]);
             const MAY_REQUIRE_REALLOC: bool = false $(|| $t::MAY_REQUIRE_REALLOC)*;
+            const MAY_REQUIRE_RESOURCE: bool = false $(|| $t::MAY_REQUIRE_RESOURCE)*;
 
             const IS_RUST_UNIT_TYPE: bool = {
                 let mut _is_unit = true;
@@ -2980,6 +3002,7 @@ where
 {
     type Lower = [T::Lower; N];
 
+    const MAY_REQUIRE_RESOURCE: bool = T::MAY_REQUIRE_RESOURCE;
     const ABI: CanonicalAbiInfo = CanonicalAbiInfo::fixed_length_list_static(&T::ABI, N);
 
     fn typecheck(ty: &InterfaceType, types: &InstanceType<'_>) -> Result<()> {

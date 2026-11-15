@@ -106,6 +106,22 @@ impl HostFunc {
         )
     }
 
+    /// A synchronous host implementation that cannot access this store.
+    pub(crate) fn func_wrap_data<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>
+    where
+        T: 'static,
+        F: Fn(&mut T, P) -> Result<R> + Send + Sync + 'static,
+        P: ComponentNamedList + Lift + 'static,
+        R: ComponentNamedList + Lower + 'static,
+    {
+        Self::new(
+            Asyncness::No,
+            StaticHostFn::<_, false, true>::new(move |mut store, params| {
+                HostResult::Done(func(store.data_mut(), params))
+            }),
+        )
+    }
+
     /// An async-WIT import whose host implementation completes immediately.
     #[cfg(feature = "component-model-async")]
     pub(crate) fn func_wrap_concurrent_immediate<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>
@@ -306,6 +322,9 @@ where
     /// component model.
     const ASYNC: bool;
 
+    /// The implementation cannot reenter the store or access task resources.
+    const TASK_FREE: bool = false;
+
     /// Performs a type-check to ensure that this host function can be imported
     /// with the provided signature that a component is using.
     fn typecheck(ty: TypeFuncIndex, types: &InstanceType<'_>) -> Result<()>;
@@ -387,6 +406,10 @@ where
         let vminstance = instance.id().get(store.0);
         let async_ = vminstance.component().env_component().options[options].async_;
 
+        if !async_ && Self::TASK_FREE {
+            return self.call_sync_lower(store, instance, ty, options, storage, false);
+        }
+
         // If this is a synchronous-lower of a host-async function, then the
         // guest is blocking. Test, in the context of the guest task, if that's
         // allowed.
@@ -408,7 +431,7 @@ where
                  when `component-model-async` feature disabled"
             );
         } else {
-            self.call_sync_lower(store.as_context_mut(), instance, ty, options, storage)?;
+            self.call_sync_lower(store.as_context_mut(), instance, ty, options, storage, true)?;
             true
         };
 
@@ -438,6 +461,7 @@ where
         ty: TypeFuncIndex,
         options: OptionsIndex,
         storage: &mut [MaybeUninit<ValRaw>],
+        entered_host_task: bool,
     ) -> Result<()> {
         let mut lift = LiftContext::new(store.0.store_opaque_mut(), options, instance)?;
         let (params, rest) = self.load_params(&mut lift, ty, MAX_FLAT_PARAMS, storage)?;
@@ -464,7 +488,7 @@ where
                 ptr,
             )?)
         };
-        Self::lower_result_and_exit_call(&mut lower, ty, Some(ret), dst)
+        Self::lower_result_and_exit_call(&mut lower, ty, Some(ret), dst, entered_host_task)
     }
 
     /// Implementation of the "async" ABI of the component model.
@@ -518,6 +542,7 @@ where
                     ty,
                     Some(result?),
                     Destination::Memory(retptr),
+                    true,
                 )?;
                 None
             }
@@ -529,6 +554,7 @@ where
                         ty,
                         ret,
                         Destination::Memory(retptr),
+                        true,
                     )
                 })?
             }
@@ -587,16 +613,19 @@ where
         ty: TypeFuncIndex,
         ret: Option<R>,
         dst: Destination<'_>,
+        entered_host_task: bool,
     ) -> Result<()> {
         // Before lowering below semantically ensure that the caller has dropped
         // all of its borrows and such.
-        lower.validate_scope_exit()?;
+        if entered_host_task {
+            lower.validate_scope_exit()?;
 
-        // At this point we're transitioning back to the caller task which means
-        // that the current task needs to be updated. This will restore the
-        // currently running thread as the caller's thread, for example if
-        // lowering below calls `realloc` it'll use the right context.
-        lower.store.0.host_task_reenter_caller()?;
+            // At this point we're transitioning back to the caller task which means
+            // that the current task needs to be updated. This will restore the
+            // currently running thread as the caller's thread, for example if
+            // lowering below calls `realloc` it'll use the right context.
+            lower.store.0.host_task_reenter_caller()?;
+        }
 
         if let Some(ret) = ret {
             let caller_instance = lower.options().instance;
@@ -650,9 +679,9 @@ fn typecheck_async(host_async: bool, wit_async: bool) -> Result<()> {
 /// Implementation of a "static" host function where the parameters and results
 /// of a function are known at compile time.
 #[repr(transparent)]
-struct StaticHostFn<F, const ASYNC: bool>(F);
+struct StaticHostFn<F, const ASYNC: bool, const DATA_ONLY: bool = false>(F);
 
-impl<F, const ASYNC: bool> StaticHostFn<F, ASYNC> {
+impl<F, const ASYNC: bool, const DATA_ONLY: bool> StaticHostFn<F, ASYNC, DATA_ONLY> {
     fn new<T, P, R>(func: F) -> Self
     where
         T: 'static,
@@ -664,7 +693,8 @@ impl<F, const ASYNC: bool> StaticHostFn<F, ASYNC> {
     }
 }
 
-impl<T, F, P, R, const ASYNC: bool> HostFn<T, P, R> for StaticHostFn<F, ASYNC>
+impl<T, F, P, R, const ASYNC: bool, const DATA_ONLY: bool> HostFn<T, P, R>
+    for StaticHostFn<F, ASYNC, DATA_ONLY>
 where
     T: 'static,
     F: Fn(StoreContextMut<'_, T>, P) -> HostResult<R>,
@@ -672,6 +702,11 @@ where
     R: ComponentNamedList + Lower + 'static,
 {
     const ASYNC: bool = ASYNC;
+    const TASK_FREE: bool = DATA_ONLY
+        && !ASYNC
+        && !P::MAY_REQUIRE_RESOURCE
+        && !R::MAY_REQUIRE_RESOURCE
+        && !R::MAY_REQUIRE_REALLOC;
 
     fn typecheck(ty: TypeFuncIndex, types: &InstanceType<'_>) -> Result<()> {
         let ty = &types.types[ty];

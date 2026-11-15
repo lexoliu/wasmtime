@@ -2718,6 +2718,8 @@ pub fn add_to_linker<T, D>(
                 "func_wrap_concurrent"
             } else if flags.contains(FunctionFlags::ASYNC) {
                 "func_wrap_async"
+            } else if !flags.contains(FunctionFlags::STORE) {
+                "func_wrap_data"
             } else {
                 "func_wrap"
             },
@@ -2743,9 +2745,13 @@ pub fn add_to_linker<T, D>(
         // Generate the closure that's passed to a `Linker`, the final piece of
         // codegen here.
 
+        let data_only =
+            !func.kind.is_async() && !flags.intersects(FunctionFlags::ASYNC | FunctionFlags::STORE);
         let wt = self.generator.wasmtime_path();
         if func.kind.is_async() && !flags.contains(FunctionFlags::IMMEDIATE) {
             uwrite!(self.src, "move |caller: &{wt}::component::Accessor::<T>, (");
+        } else if data_only {
+            uwrite!(self.src, "move |caller: &mut T, (");
         } else {
             uwrite!(
                 self.src,
@@ -2846,6 +2852,8 @@ pub fn add_to_linker<T, D>(
                 self.src,
                 "let host = {wt}::component::Access::<T, D>::new(access_cx, host_getter);"
             );
+        } else if data_only {
+            self.src.push_str("let host = &mut host_getter(caller);\n");
         } else {
             self.src
                 .push_str("let host = &mut host_getter(caller.data_mut());\n");
