@@ -303,68 +303,50 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "roundtrip-flag1",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (Flag1,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (Flag1,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::roundtrip_flag1(host, arg0);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "roundtrip-flag2",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (Flag2,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (Flag2,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::roundtrip_flag2(host, arg0);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "roundtrip-flag4",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (Flag4,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (Flag4,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::roundtrip_flag4(host, arg0);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "roundtrip-flag8",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (Flag8,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (Flag8,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::roundtrip_flag8(host, arg0);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "roundtrip-flag16",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (Flag16,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (Flag16,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::roundtrip_flag16(host, arg0);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "roundtrip-flag32",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (Flag32,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (Flag32,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::roundtrip_flag32(host, arg0);
                         Ok((r,))
                     },

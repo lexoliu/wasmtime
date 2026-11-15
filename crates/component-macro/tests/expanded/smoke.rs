@@ -200,10 +200,10 @@ pub mod imports {
         for<'a> D::Data<'a>: Host,
         T: 'static,
     {
-        inst.func_wrap(
+        inst.func_wrap_data(
             "y",
-            move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                let host = &mut host_getter(caller.data_mut());
+            move |caller: &mut T, (): ()| {
+                let host = &mut host_getter(caller);
                 let r = Host::y(host);
                 Ok(r)
             },

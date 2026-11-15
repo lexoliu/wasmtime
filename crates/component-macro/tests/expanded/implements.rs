@@ -227,21 +227,21 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "get",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): (wasmtime::component::__internal::String,)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::get(host, arg0);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "set",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (
                             arg0,
                             arg1,
@@ -250,7 +250,7 @@ pub mod foo {
                             wasmtime::component::__internal::String,
                         )|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::set(host, arg0, arg1);
                         Ok(r)
                     },

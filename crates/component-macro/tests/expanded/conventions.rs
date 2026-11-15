@@ -304,101 +304,98 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "kebab-case",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::kebab_case(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "foo",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (LudicrousSpeed,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (LudicrousSpeed,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::foo(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "function-with-dashes",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::function_with_dashes(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "function-with-no-weird-characters",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::function_with_no_weird_characters(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "apple",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::apple(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "apple-pear",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::apple_pear(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "apple-pear-grape",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::apple_pear_grape(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "a0",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::a0(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "is-XML",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::is_xml(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "explicit",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::explicit(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "explicit-kebab",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::explicit_kebab(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "bool",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::bool(host);
                         Ok(r)
                     },

@@ -300,10 +300,10 @@ const _: () = {
                 }
                 if options.experimental_world_function_import {
                     linker
-                        .func_wrap(
+                        .func_wrap_data(
                             "foo",
-                            move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                                let host = &mut host_getter(caller.data_mut());
+                            move |caller: &mut T, (): ()| {
+                                let host = &mut host_getter(caller);
                                 let r = TheWorldImports::foo(host);
                                 Ok(r)
                             },
@@ -311,13 +311,13 @@ const _: () = {
                 }
                 if options.experimental_world_resource_method {
                     linker
-                        .func_wrap(
+                        .func_wrap_data(
                             "[method]baz.foo",
                             move |
-                                mut caller: wasmtime::StoreContextMut<'_, T>,
+                                caller: &mut T,
                                 (arg0,): (wasmtime::component::Resource<Baz>,)|
                             {
-                                let host = &mut host_getter(caller.data_mut());
+                                let host = &mut host_getter(caller);
                                 let r = HostBaz::foo(host, arg0);
                                 Ok(r)
                             },
@@ -457,23 +457,23 @@ pub mod foo {
                         )?;
                     }
                     if options.experimental_interface_function {
-                        inst.func_wrap(
+                        inst.func_wrap_data(
                             "foo",
-                            move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                                let host = &mut host_getter(caller.data_mut());
+                            move |caller: &mut T, (): ()| {
+                                let host = &mut host_getter(caller);
                                 let r = Host::foo(host);
                                 Ok(r)
                             },
                         )?;
                     }
                     if options.experimental_interface_resource_method {
-                        inst.func_wrap(
+                        inst.func_wrap_data(
                             "[method]bar.foo",
                             move |
-                                mut caller: wasmtime::StoreContextMut<'_, T>,
+                                caller: &mut T,
                                 (arg0,): (wasmtime::component::Resource<Bar>,)|
                             {
-                                let host = &mut host_getter(caller.data_mut());
+                                let host = &mut host_getter(caller);
                                 let r = HostBar::foo(host, arg0);
                                 Ok(r)
                             },

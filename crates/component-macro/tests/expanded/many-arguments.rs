@@ -355,10 +355,10 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "many-args",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (
                             arg0,
                             arg1,
@@ -395,7 +395,7 @@ pub mod foo {
                             u64,
                         )|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::many_args(
                             host,
                             arg0,
@@ -418,13 +418,10 @@ pub mod foo {
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "big-argument",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (BigStruct,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (BigStruct,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::big_argument(host, arg0);
                         Ok(r)
                     },

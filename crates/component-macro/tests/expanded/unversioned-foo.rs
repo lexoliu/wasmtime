@@ -236,10 +236,10 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "g",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::g(host);
                         Ok((r,))
                     },

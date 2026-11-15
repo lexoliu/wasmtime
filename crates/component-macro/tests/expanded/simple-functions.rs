@@ -233,56 +233,50 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "f1",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::f1(host);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "f2",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (arg0,): (u32,)| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (u32,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::f2(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "f3",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0, arg1): (u32, u32)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0, arg1): (u32, u32)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::f3(host, arg0, arg1);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "f4",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::f4(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "f5",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::f5(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "f6",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0, arg1, arg2): (u32, u32, u32)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0, arg1, arg2): (u32, u32, u32)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::f6(host, arg0, arg1, arg2);
                         Ok((r,))
                     },

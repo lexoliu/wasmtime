@@ -696,61 +696,58 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "e1-arg",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (arg0,): (E1,)| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (E1,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::e1_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "e1-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::e1_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "v1-arg",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (arg0,): (V1,)| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (V1,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::v1_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "v1-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::v1_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "bool-arg",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (bool,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (bool,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::bool_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "bool-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::bool_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "option-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (
                             arg0,
                             arg1,
@@ -767,7 +764,7 @@ pub mod foo {
                             Option<Option<bool>>,
                         )|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::option_arg(
                             host,
                             arg0,
@@ -780,18 +777,18 @@ pub mod foo {
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "option-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::option_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "casts",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (
                             arg0,
                             arg1,
@@ -801,15 +798,15 @@ pub mod foo {
                             arg5,
                         ): (Casts1, Casts2, Casts3, Casts4, Casts5, Casts6)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::casts(host, arg0, arg1, arg2, arg3, arg4, arg5);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "result-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (
                             arg0,
                             arg1,
@@ -829,7 +826,7 @@ pub mod foo {
                             >,
                         )|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::result_arg(
                             host,
                             arg0,
@@ -842,85 +839,82 @@ pub mod foo {
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "result-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::result_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "return-result-sugar",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::return_result_sugar(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "return-result-sugar2",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::return_result_sugar2(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "return-result-sugar3",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::return_result_sugar3(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "return-result-sugar4",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::return_result_sugar4(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "return-option-sugar",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::return_option_sugar(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "return-option-sugar2",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::return_option_sugar2(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "result-simple",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::result_simple(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "is-clone-arg",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (IsClone,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (IsClone,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::is_clone_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "is-clone-return",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::is_clone_return(host);
                         Ok((r,))
                     },

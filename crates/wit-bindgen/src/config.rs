@@ -12,6 +12,7 @@ bitflags::bitflags! {
         const VERBOSE_TRACING = 1 << 4;
         const EXACT = 1 << 5;
         const IMMEDIATE = 1 << 6;
+        const BORROWED = 1 << 7;
     }
 }
 
@@ -61,13 +62,15 @@ impl FunctionConfig {
 
     /// Rejects import-only flags on exported functions.
     pub fn validate_exports(&self) -> Result<()> {
-        if self.default.contains(FunctionFlags::IMMEDIATE)
-            || self
-                .rules
-                .iter()
-                .any(|rule| rule.flags.contains(FunctionFlags::IMMEDIATE))
+        if self
+            .default
+            .intersects(FunctionFlags::IMMEDIATE | FunctionFlags::BORROWED)
+            || self.rules.iter().any(|rule| {
+                rule.flags
+                    .intersects(FunctionFlags::IMMEDIATE | FunctionFlags::BORROWED)
+            })
         {
-            anyhow::bail!("`immediate` configures host imports, not guest exports");
+            anyhow::bail!("`immediate` and `borrowed` configure host imports, not guest exports");
         }
         Ok(())
     }

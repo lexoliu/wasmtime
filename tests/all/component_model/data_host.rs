@@ -15,6 +15,20 @@ mod generated {
     }
 }
 
+mod borrowed_generated {
+    wasmtime::component::bindgen!({
+        path: "tests/all/component_model/data-host-memory.wit",
+        imports: { default: borrowed | trappable },
+    });
+
+    impl BorrowedHostImports for u32 {
+        fn inspect(&mut self, _text: &str, _bytes: &[u8]) -> wasmtime::Result<u32> {
+            *self += 1;
+            Ok(*self)
+        }
+    }
+}
+
 fn engine(concurrent: bool) -> Result<Engine> {
     let mut config = Config::new();
     config.concurrency_support(concurrent);
@@ -159,22 +173,29 @@ fn data_host_borrows_memory_while_mutating_state() -> Result<()> {
     use wasmtime::component::{WasmList, WasmStr};
 
     let text = "中文、日本語、한국어";
-    for concurrent in [false, true] {
+    for (concurrent, generated) in [(false, false), (false, true), (true, false), (true, true)] {
         let engine = engine(concurrent)?;
         let component = Component::new(&engine, include_str!("data-host-memory.wat"))?;
         let mut linker = Linker::<u32>::new(&engine);
-        linker.root().func_wrap_data_memory(
-            "inspect",
-            move |calls, memory, (cursor, bytes): (WasmStr, WasmList<u8>)| {
-                let decoded = cursor.to_str_in(memory)?;
-                assert_eq!(decoded, text);
-                if let Cow::Borrowed(value) = &decoded {
-                    assert_eq!(value.as_ptr(), bytes.as_le_slice_in(memory).as_ptr());
-                }
-                *calls += 1;
-                Ok((*calls,))
-            },
-        )?;
+        if generated {
+            borrowed_generated::BorrowedHost::add_to_linker::<_, wasmtime::component::HasSelf<u32>>(
+                &mut linker,
+                |data| data,
+            )?;
+        } else {
+            linker.root().func_wrap_data_memory(
+                "inspect",
+                move |calls, memory, (cursor, bytes): (WasmStr, WasmList<u8>)| {
+                    let decoded = cursor.to_str_in(memory)?;
+                    assert_eq!(decoded, text);
+                    if let Cow::Borrowed(value) = &decoded {
+                        assert_eq!(value.as_ptr(), bytes.as_le_slice_in(memory).as_ptr());
+                    }
+                    *calls += 1;
+                    Ok((*calls,))
+                },
+            )?;
+        }
         let mut store = Store::new(&engine, 0);
         let instance = linker.instantiate(&mut store, &component)?;
         let utf8 = instance.get_typed_func::<(u32, u32), (u32,)>(&mut store, "utf8")?;

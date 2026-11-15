@@ -1,0 +1,8 @@
+package test:borrowed-host;
+
+world borrowed-host {
+    type octet = u8;
+    type bytes = list<octet>;
+    type text = string;
+    import inspect: func(text: text, bytes: bytes) -> u32;
+}

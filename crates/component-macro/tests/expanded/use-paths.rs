@@ -229,10 +229,10 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "a",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::a(host);
                         Ok((r,))
                     },
@@ -283,10 +283,10 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "a",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::a(host);
                         Ok((r,))
                     },
@@ -337,10 +337,10 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "a",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::a(host);
                         Ok((r,))
                     },
@@ -393,10 +393,10 @@ pub mod d {
         for<'a> D::Data<'a>: Host,
         T: 'static,
     {
-        inst.func_wrap(
+        inst.func_wrap_data(
             "b",
-            move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                let host = &mut host_getter(caller.data_mut());
+            move |caller: &mut T, (): ()| {
+                let host = &mut host_getter(caller);
                 let r = Host::b(host);
                 Ok((r,))
             },

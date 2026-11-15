@@ -281,40 +281,40 @@ const _: () = {
                     },
                 )?;
             linker
-                .func_wrap(
+                .func_wrap_data(
                     "some-world-func",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = TheWorldImports::some_world_func(host);
                         Ok((r,))
                     },
                 )?;
             linker
-                .func_wrap(
+                .func_wrap_data(
                     "[constructor]world-resource",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = HostWorldResource::new(host);
                         Ok((r,))
                     },
                 )?;
             linker
-                .func_wrap(
+                .func_wrap_data(
                     "[method]world-resource.foo",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): (wasmtime::component::Resource<WorldResource>,)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = HostWorldResource::foo(host, arg0);
                         Ok(r)
                     },
                 )?;
             linker
-                .func_wrap(
+                .func_wrap_data(
                     "[static]world-resource.static-foo",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = HostWorldResource::static_foo(host);
                         Ok(r)
                     },
@@ -717,157 +717,157 @@ pub mod foo {
                         )
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "[constructor]bar",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = HostBar::new(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "[static]bar.static-a",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = HostBar::static_a(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "[method]bar.method-a",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): (wasmtime::component::Resource<Bar>,)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = HostBar::method_a(host, arg0);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "bar-own-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): (wasmtime::component::Resource<Bar>,)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::bar_own_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "bar-borrow-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): (wasmtime::component::Resource<Bar>,)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::bar_borrow_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "bar-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::bar_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "tuple-own-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): ((wasmtime::component::Resource<Bar>, u32),)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::tuple_own_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "tuple-borrow-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): ((wasmtime::component::Resource<Bar>, u32),)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::tuple_borrow_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "tuple-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::tuple_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "option-own-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): (Option<wasmtime::component::Resource<Bar>>,)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::option_own_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "option-borrow-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): (Option<wasmtime::component::Resource<Bar>>,)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::option_borrow_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "option-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::option_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "result-own-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): (Result<wasmtime::component::Resource<Bar>, ()>,)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::result_own_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "result-borrow-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (arg0,): (Result<wasmtime::component::Resource<Bar>, ()>,)|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::result_borrow_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "result-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::result_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "list-own-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (
                             arg0,
                         ): (
@@ -876,15 +876,15 @@ pub mod foo {
                             >,
                         )|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::list_own_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "list-borrow-arg",
                     move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
+                        caller: &mut T,
                         (
                             arg0,
                         ): (
@@ -893,64 +893,55 @@ pub mod foo {
                             >,
                         )|
                     {
-                        let host = &mut host_getter(caller.data_mut());
+                        let host = &mut host_getter(caller);
                         let r = Host::list_borrow_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "list-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::list_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "record-own-arg",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (NestedOwn,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (NestedOwn,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::record_own_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "record-borrow-arg",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (NestedBorrow,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (NestedBorrow,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::record_borrow_arg(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "record-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::record_result(host);
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "func-with-handle-typedef",
-                    move |
-                        mut caller: wasmtime::StoreContextMut<'_, T>,
-                        (arg0,): (SomeHandle,)|
-                    {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (arg0,): (SomeHandle,)| {
+                        let host = &mut host_getter(caller);
                         let r = Host::func_with_handle_typedef(host, arg0);
                         Ok(r)
                     },
                 )?;
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "[constructor]fallible",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = HostFallible::new(host);
                         Ok((r,))
                     },
@@ -1136,10 +1127,10 @@ pub mod foo {
                 for<'a> D::Data<'a>: Host,
                 T: 'static,
             {
-                inst.func_wrap(
+                inst.func_wrap_data(
                     "foo",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
+                    move |caller: &mut T, (): ()| {
+                        let host = &mut host_getter(caller);
                         let r = Host::foo(host);
                         Ok((r,))
                     },
