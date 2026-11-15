@@ -5,7 +5,8 @@ use crate::component::instance::RuntimeImport;
 use crate::component::matching::{InstanceType, TypeChecker};
 use crate::component::types;
 use crate::component::{
-    Component, ComponentNamedList, Instance, InstancePre, Lift, Lower, ResourceType, Val,
+    Component, ComponentNamedList, HostMemory, Instance, InstancePre, Lift, Lower, ResourceType,
+    Val,
 };
 use crate::prelude::*;
 use crate::{AsContextMut, Engine, Module, StoreContextMut};
@@ -517,6 +518,26 @@ impl<T: 'static> LinkerInstance<'_, T> {
         Return: ComponentNamedList + Lower + 'static,
     {
         self.insert(name, Definition::Func(HostFunc::func_wrap_data(func)?))?;
+        Ok(())
+    }
+
+    /// Defines a synchronous host function with separate data and memory access.
+    ///
+    /// The closure can mutate its host data and borrow component string or list
+    /// arguments through `memory`, but cannot reenter the guest. Borrowed memory
+    /// must be consumed before the closure returns. As with [`Self::func_wrap`],
+    /// using a [`crate::component::WasmStr`] cursor requires explicitly decoding
+    /// it to validate its encoding, even when the host ignores its contents.
+    pub fn func_wrap_data_memory<F, Params, Return>(&mut self, name: &str, func: F) -> Result<()>
+    where
+        F: Fn(&mut T, HostMemory<'_>, Params) -> Result<Return> + Send + Sync + 'static,
+        Params: ComponentNamedList + Lift + 'static,
+        Return: ComponentNamedList + Lower + 'static,
+    {
+        self.insert(
+            name,
+            Definition::Func(HostFunc::func_wrap_data_memory(func)?),
+        )?;
         Ok(())
     }
 

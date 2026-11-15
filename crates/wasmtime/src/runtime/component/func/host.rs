@@ -8,7 +8,7 @@ use crate::component::func::{LiftContext, LowerContext};
 use crate::component::matching::InstanceType;
 use crate::component::storage::{slice_to_storage, slice_to_storage_mut};
 use crate::component::types::ComponentFunc;
-use crate::component::{ComponentNamedList, Instance, Lift, Lower, Val};
+use crate::component::{ComponentNamedList, HostMemory, Instance, Lift, Lower, Val};
 use crate::prelude::*;
 use crate::runtime::vm::component::{
     ComponentInstance, VMComponentContext, VMLowering, VMLoweringCallee,
@@ -118,6 +118,23 @@ impl HostFunc {
             Asyncness::No,
             StaticHostFn::<_, false, true>::new(move |mut store, params| {
                 HostResult::Done(func(store.data_mut(), params))
+            }),
+        )
+    }
+
+    /// A synchronous host implementation with separate state and memory access.
+    pub(crate) fn func_wrap_data_memory<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>
+    where
+        T: 'static,
+        F: Fn(&mut T, HostMemory<'_>, P) -> Result<R> + Send + Sync + 'static,
+        P: ComponentNamedList + Lift + 'static,
+        R: ComponentNamedList + Lower + 'static,
+    {
+        Self::new(
+            Asyncness::No,
+            StaticHostFn::<_, false, true>::new(move |store, params| {
+                let (data, opaque) = store.0.data_and_opaque();
+                HostResult::Done(func(data, HostMemory { store: opaque }, params))
             }),
         )
     }

@@ -152,3 +152,50 @@ fn data_host_string_result_preserves_guest_realloc() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn data_host_borrows_memory_while_mutating_state() -> Result<()> {
+    use std::borrow::Cow;
+    use wasmtime::component::{WasmList, WasmStr};
+
+    let text = "中文、日本語、한국어";
+    for concurrent in [false, true] {
+        let engine = engine(concurrent)?;
+        let component = Component::new(&engine, include_str!("data-host-memory.wat"))?;
+        let mut linker = Linker::<u32>::new(&engine);
+        linker.root().func_wrap_data_memory(
+            "inspect",
+            move |calls, memory, (cursor, bytes): (WasmStr, WasmList<u8>)| {
+                let decoded = cursor.to_str_in(memory)?;
+                assert_eq!(decoded, text);
+                if let Cow::Borrowed(value) = &decoded {
+                    assert_eq!(value.as_ptr(), bytes.as_le_slice_in(memory).as_ptr());
+                }
+                *calls += 1;
+                Ok((*calls,))
+            },
+        )?;
+        let mut store = Store::new(&engine, 0);
+        let instance = linker.instantiate(&mut store, &component)?;
+        let utf8 = instance.get_typed_func::<(u32, u32), (u32,)>(&mut store, "utf8")?;
+        let utf16 = instance.get_typed_func::<(u32, u32), (u32,)>(&mut store, "utf16")?;
+        assert_eq!(utf8.call(&mut store, (0, text.len() as u32))?, (1,));
+        assert_eq!(
+            utf16.call(&mut store, (128, text.encode_utf16().count() as u32))?,
+            (2,)
+        );
+        if concurrent {
+            store.assert_concurrent_state_empty();
+        }
+
+        for (ptr, len, error) in [(127, 1, "utf-8"), (65535, 2, "out of bounds")] {
+            let mut store = Store::new(&engine, 0);
+            let instance = linker.instantiate(&mut store, &component)?;
+            let run = instance.get_typed_func::<(u32, u32), (u32,)>(&mut store, "utf8")?;
+            let trap = run.call(&mut store, (ptr, len)).unwrap_err();
+            assert!(format!("{trap:#}").contains(error), "{trap:#}");
+            assert_eq!(*store.data(), 0);
+        }
+    }
+    Ok(())
+}
