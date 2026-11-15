@@ -1,0 +1,20 @@
+(component
+  (import "increment" (func $increment async (param "n" u32)))
+  (core func $sync (canon lower (func $increment)))
+  (core func $async (canon lower (func $increment) async))
+  (core module $m
+    (import "" "sync" (func $sync (param i32)))
+    (import "" "async" (func $async (param i32) (result i32)))
+    (func (export "sync")
+      (call $sync (i32.const 7))
+      (call $sync (i32.const 11)))
+    (func (export "async")
+      (drop (call $async (i32.const 7)))
+      (drop (call $async (i32.const 11)))))
+  (core instance $i (instantiate $m (with "" (instance
+    (export "sync" (func $sync))
+    (export "async" (func $async))))))
+  (func (export "sync") async (canon lift (core func $i "sync")))
+  (func (export "async") async (canon lift (core func $i "async")))
+  (func (export "reenter") (canon lift (core func $i "sync")))
+)

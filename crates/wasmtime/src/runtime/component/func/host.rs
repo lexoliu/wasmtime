@@ -106,6 +106,23 @@ impl HostFunc {
         )
     }
 
+    /// An async-WIT import whose host implementation completes immediately.
+    #[cfg(feature = "component-model-async")]
+    pub(crate) fn func_wrap_concurrent_immediate<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>
+    where
+        T: 'static,
+        F: Fn(StoreContextMut<T>, P) -> Result<R> + Send + Sync + 'static,
+        P: ComponentNamedList + Lift + 'static,
+        R: ComponentNamedList + Lower + 'static,
+    {
+        Self::new(
+            Asyncness::No,
+            StaticHostFn::<_, true>::new(move |store, params| {
+                HostResult::Done(func(store, params))
+            }),
+        )
+    }
+
     /// Equivalent for `Linker::func_wrap_async`
     #[cfg(feature = "async")]
     pub(crate) fn func_wrap_async<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>
