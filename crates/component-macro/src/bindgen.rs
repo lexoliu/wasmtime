@@ -272,6 +272,7 @@ mod kw {
     syn::custom_keyword!(store);
     syn::custom_keyword!(trappable);
     syn::custom_keyword!(immediate);
+    syn::custom_keyword!(borrowed);
     syn::custom_keyword!(exact);
 }
 
@@ -541,6 +542,9 @@ fn parse_function_config(input: ParseStream<'_>) -> Result<FunctionConfig> {
                 } else if l.peek(kw::immediate) {
                     input.parse::<kw::immediate>()?;
                     flags |= FunctionFlags::IMMEDIATE;
+                } else if l.peek(kw::borrowed) {
+                    input.parse::<kw::borrowed>()?;
+                    flags |= FunctionFlags::BORROWED;
                 } else if l.peek(kw::tracing) {
                     input.parse::<kw::tracing>()?;
                     flags |= FunctionFlags::TRACING;
@@ -571,6 +575,16 @@ fn parse_function_config(input: ParseStream<'_>) -> Result<FunctionConfig> {
                 return Err(input
                     .error("`async` and `immediate` host implementations are mutually exclusive"));
             }
+            if flags.contains(FunctionFlags::BORROWED | FunctionFlags::IMMEDIATE) {
+                return Err(input.error(
+                    "`borrowed` and `immediate` host implementations are mutually exclusive",
+                ));
+            }
+            if flags.contains(FunctionFlags::BORROWED)
+                && flags.intersects(FunctionFlags::ASYNC | FunctionFlags::STORE)
+            {
+                return Err(input.error("`borrowed` requires a synchronous host without `store`"));
+            }
             Ok(FunctionConfigSyntax { filter, flags })
         }
     }
@@ -580,6 +594,30 @@ fn parse_function_config(input: ParseStream<'_>) -> Result<FunctionConfig> {
 mod tests {
     use super::parse_function_config;
     use syn::parse::Parser;
+
+    #[test]
+    fn borrowed_requires_a_synchronous_data_host() {
+        for input in [
+            "{ default: borrowed | async }",
+            "{ default: store | borrowed }",
+        ] {
+            let error = parse_function_config.parse_str(input).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("synchronous host without `store`")
+            );
+        }
+        assert!(
+            parse_function_config
+                .parse_str("{ default: borrowed | immediate }")
+                .is_err()
+        );
+        let config = parse_function_config
+            .parse_str("{ default: borrowed }")
+            .unwrap();
+        assert!(config.validate_exports().is_err());
+    }
 
     #[test]
     fn immediate_and_async_are_mutually_exclusive() {

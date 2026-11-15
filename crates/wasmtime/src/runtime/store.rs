@@ -1485,6 +1485,12 @@ impl<T> StoreInner<T> {
         self.data_limiter_and_opaque().0
     }
 
+    #[cfg(feature = "component-model")]
+    pub(crate) fn data_and_opaque(&mut self) -> (&mut T, &StoreOpaque) {
+        let (data, _, opaque) = self.data_limiter_and_opaque();
+        (data, opaque)
+    }
+
     #[inline]
     pub fn call_hook(&mut self, s: CallHook) -> Result<()> {
         if self.inner.pkey.is_none() && self.call_hook.is_none() {

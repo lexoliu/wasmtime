@@ -5,7 +5,8 @@ use crate::component::instance::RuntimeImport;
 use crate::component::matching::{InstanceType, TypeChecker};
 use crate::component::types;
 use crate::component::{
-    Component, ComponentNamedList, Instance, InstancePre, Lift, Lower, ResourceType, Val,
+    Component, ComponentNamedList, HostMemory, Instance, InstancePre, Lift, Lower, ResourceType,
+    Val,
 };
 use crate::prelude::*;
 use crate::{AsContextMut, Engine, Module, StoreContextMut};
@@ -517,6 +518,74 @@ impl<T: 'static> LinkerInstance<'_, T> {
         Return: ComponentNamedList + Lower + 'static,
     {
         self.insert(name, Definition::Func(HostFunc::func_wrap_data(func)?))?;
+        Ok(())
+    }
+
+    /// Defines a synchronous host function with separate data and memory access.
+    ///
+    /// The closure can mutate its host data and borrow component string or list
+    /// arguments through `memory`, but cannot reenter the guest. Borrowed memory
+    /// must be consumed before the closure returns. As with [`Self::func_wrap`],
+    /// using a [`crate::component::WasmStr`] cursor requires explicitly decoding
+    /// it to validate its encoding, even when the host ignores its contents.
+    pub fn func_wrap_data_memory<F, Params, Return>(&mut self, name: &str, func: F) -> Result<()>
+    where
+        F: Fn(&mut T, HostMemory<'_>, Params) -> Result<Return> + Send + Sync + 'static,
+        Params: ComponentNamedList + Lift + 'static,
+        Return: ComponentNamedList + Lower + 'static,
+    {
+        self.insert(
+            name,
+            Definition::Func(HostFunc::func_wrap_data_memory(func)?),
+        )?;
+        Ok(())
+    }
+
+    /// Defines a concurrent host function with synchronous input preparation.
+    ///
+    /// `prepare` runs before the host future is created. It can decode borrowed
+    /// guest inputs and build the final owned request while mutating host data,
+    /// but cannot reenter guest code. Only its `Send + Sync + 'static` result reaches
+    /// `execute`, so guest-memory references cannot survive suspension.
+    /// Preparation errors trap without calling `execute`. Cancellation drops
+    /// the prepared request with the future that owns it.
+    ///
+    /// Cursor inputs must be decoded in `prepare` even if unused, just as with
+    /// [`Self::func_wrap_data_memory`]. Resource arguments retain the ordinary
+    /// concurrent host-task scope.
+    ///
+    /// A borrowed slice cannot become the prepared request:
+    ///
+    /// ```compile_fail
+    /// use wasmtime::{Engine, component::{Linker, WasmList}};
+    /// let mut linker = Linker::<()>::new(&Engine::default());
+    /// linker.root().func_wrap_concurrent_prepare(
+    ///     "write",
+    ///     |_, memory, (bytes,): (WasmList<u8>,)| Ok(bytes.as_le_slice_in(memory)),
+    ///     |_, bytes| Box::pin(async move { let _ = bytes; Ok(()) }),
+    /// ).unwrap();
+    /// ```
+    #[cfg(feature = "component-model-async")]
+    pub fn func_wrap_concurrent_prepare<Params, Prepared, Return, Prepare, Execute>(
+        &mut self,
+        name: &str,
+        prepare: Prepare,
+        execute: Execute,
+    ) -> Result<()>
+    where
+        Prepare: Fn(&mut T, HostMemory<'_>, Params) -> Result<Prepared> + Send + Sync + 'static,
+        Execute: Fn(&Accessor<T>, Prepared) -> Pin<Box<dyn Future<Output = Result<Return>> + Send + '_>>
+            + Send
+            + Sync
+            + 'static,
+        Params: ComponentNamedList + Lift + 'static,
+        Prepared: Send + Sync + 'static,
+        Return: ComponentNamedList + Lower + 'static,
+    {
+        self.insert(
+            name,
+            Definition::Func(HostFunc::func_wrap_concurrent_prepare(prepare, execute)?),
+        )?;
         Ok(())
     }
 

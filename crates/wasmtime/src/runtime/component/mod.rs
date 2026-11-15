@@ -126,7 +126,7 @@ pub use self::concurrent::{
     TypedFuncCallConcurrent, VMComponentAsyncStore, VecBuffer, WriteBuffer,
 };
 pub use self::func::{
-    ComponentNamedList, ComponentType, Func, Lift, Lower, TypedFunc, WasmList, WasmStr,
+    ComponentNamedList, ComponentType, Func, HostMemory, Lift, Lower, TypedFunc, WasmList, WasmStr,
 };
 pub use self::has_data::*;
 pub use self::instance::{Instance, InstancePre};
@@ -162,6 +162,7 @@ pub mod __internal {
     pub use crate::MaybeUninitExt;
     pub use crate::map_maybe_uninit;
     pub use crate::store::StoreOpaque;
+    pub use alloc::borrow::Cow;
     pub use alloc::boxed::Box;
     pub use alloc::string::String;
     pub use alloc::vec::Vec;
@@ -328,6 +329,24 @@ pub(crate) use self::store::ComponentStoreData;
 ///         // `Accessor<T, Self>`. This flag is for imports only.
 ///         //
 ///         // "my:local/api.immediate-operation": immediate | trappable,
+///
+///         // `borrowed` gives a synchronous host direct string and byte-list
+///         // inputs as `&str` and `&[u8]`, including type aliases. The host
+///         // cannot access the store or suspend while these inputs are live.
+///         // UTF-8 strings and bytes borrow guest memory; other string
+///         // encodings are decoded before calling the host. Validation runs
+///         // even when the host ignores its arguments. Results remain owned.
+///         // Records and variants get separate `HostInput` types; nested
+///         // strings use `Cow<str>` to retain transcoded storage when needed.
+///         // For an async WIT import, a synchronous `prepare_*` method builds
+///         // an associated `*Prepared: Send + Sync + 'static` request. Only
+///         // that owned request reaches the async implementation. Preparation
+///         // returns a Wasmtime result; domain errors can be retained in the
+///         // prepared request and returned by the async implementation.
+///         // This import-only flag cannot be combined with explicit `async`
+///         // or `store` flags; WIT async imports select preparation themselves.
+///         //
+///         // "my:local/api.inspect": borrowed | trappable,
 ///
 ///         // The `tracing` flag indicates that `tracing!` will be used to log
 ///         // entries and exits into this host API. This can assist with

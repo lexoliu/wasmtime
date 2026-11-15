@@ -8,7 +8,7 @@ use crate::component::func::{LiftContext, LowerContext};
 use crate::component::matching::InstanceType;
 use crate::component::storage::{slice_to_storage, slice_to_storage_mut};
 use crate::component::types::ComponentFunc;
-use crate::component::{ComponentNamedList, Instance, Lift, Lower, Val};
+use crate::component::{ComponentNamedList, HostMemory, Instance, Lift, Lower, Val};
 use crate::prelude::*;
 use crate::runtime::vm::component::{
     ComponentInstance, VMComponentContext, VMLowering, VMLoweringCallee,
@@ -122,6 +122,23 @@ impl HostFunc {
         )
     }
 
+    /// A synchronous host implementation with separate state and memory access.
+    pub(crate) fn func_wrap_data_memory<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>
+    where
+        T: 'static,
+        F: Fn(&mut T, HostMemory<'_>, P) -> Result<R> + Send + Sync + 'static,
+        P: ComponentNamedList + Lift + 'static,
+        R: ComponentNamedList + Lower + 'static,
+    {
+        Self::new(
+            Asyncness::No,
+            StaticHostFn::<_, false, true>::new(move |store, params| {
+                let (data, opaque) = store.0.data_and_opaque();
+                HostResult::Done(func(data, HostMemory { store: opaque }, params))
+            }),
+        )
+    }
+
     /// An async-WIT import whose host implementation completes immediately.
     #[cfg(feature = "component-model-async")]
     pub(crate) fn func_wrap_concurrent_immediate<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>
@@ -183,6 +200,44 @@ impl HostFunc {
                 HostResult::Future(Box::pin(
                     store.wrap_call(move |accessor| func(accessor, params)),
                 ))
+            }),
+        )
+    }
+
+    /// Prepare borrowed inputs synchronously before creating the host future.
+    #[cfg(feature = "component-model-async")]
+    pub(crate) fn func_wrap_concurrent_prepare<T, Prepare, F, P, Prepared, R>(
+        prepare: Prepare,
+        func: F,
+    ) -> Result<Arc<HostFunc>>
+    where
+        T: 'static,
+        Prepare: Fn(&mut T, HostMemory<'_>, P) -> Result<Prepared> + Send + Sync + 'static,
+        F: Fn(&Accessor<T>, Prepared) -> Pin<Box<dyn Future<Output = Result<R>> + Send + '_>>
+            + Send
+            + Sync
+            + 'static,
+        P: ComponentNamedList + Lift + 'static,
+        Prepared: Send + Sync + 'static,
+        R: ComponentNamedList + Lower + 'static,
+    {
+        let func = Arc::new(func);
+        Self::new(
+            Asyncness::Yes,
+            StaticHostFn::<_, true>::new(move |store: StoreContextMut<'_, T>, params| {
+                let prepared = {
+                    let (data, opaque) = store.0.data_and_opaque();
+                    prepare(data, HostMemory { store: opaque }, params)
+                };
+                match prepared {
+                    Err(error) => HostResult::Done(Err(error)),
+                    Ok(prepared) => {
+                        let func = func.clone();
+                        HostResult::Future(Box::pin(
+                            store.wrap_call(move |accessor| func(accessor, prepared)),
+                        ))
+                    }
+                }
             }),
         )
     }

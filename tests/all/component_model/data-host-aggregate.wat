@@ -1,0 +1,22 @@
+(component
+  (type $payload-shape (record (field "text" string) (field "bytes" (list u8))))
+  (import "payload" (type $payload (eq $payload-shape)))
+  (import "inspect" (func $inspect (param "value" $payload) (result u32)))
+  (core module $memory
+    (memory (export "memory") 1)
+    (data (i32.const 0) "中文、日本語、한국어")
+    (data (i32.const 127) "\ff")
+    (data (i32.const 128) "\2d\4e\87\65\01\30\e5\65\2c\67\9e\8a\01\30\5c\d5\6d\ad\b4\c5"))
+  (core instance $memory (instantiate $memory))
+  (core func $utf8 (canon lower (func $inspect) (memory $memory "memory")))
+  (core func $utf16 (canon lower (func $inspect) (memory $memory "memory") string-encoding=utf16))
+  (core module $call
+    (import "" "inspect" (func $inspect (param i32 i32 i32 i32) (result i32)))
+    (func (export "run") (param i32 i32) (result i32)
+      (call $inspect (local.get 0) (local.get 1) (local.get 0) (local.get 1))))
+  (core instance $utf8 (instantiate $call (with "" (instance (export "inspect" (func $utf8))))))
+  (core instance $utf16 (instantiate $call (with "" (instance (export "inspect" (func $utf16))))))
+  (func (export "utf8") (param "ptr" u32) (param "len" u32) (result u32)
+    (canon lift (core func $utf8 "run")))
+  (func (export "utf16") (param "ptr" u32) (param "len" u32) (result u32)
+    (canon lift (core func $utf16 "run"))))
