@@ -11,6 +11,7 @@ bitflags::bitflags! {
         const TRACING = 1 << 3;
         const VERBOSE_TRACING = 1 << 4;
         const EXACT = 1 << 5;
+        const IMMEDIATE = 1 << 6;
     }
 }
 
@@ -58,6 +59,19 @@ impl FunctionConfig {
         }
     }
 
+    /// Rejects import-only flags on exported functions.
+    pub fn validate_exports(&self) -> Result<()> {
+        if self.default.contains(FunctionFlags::IMMEDIATE)
+            || self
+                .rules
+                .iter()
+                .any(|rule| rule.flags.contains(FunctionFlags::IMMEDIATE))
+        {
+            anyhow::bail!("`immediate` configures host imports, not guest exports");
+        }
+        Ok(())
+    }
+
     /// Returns the set of configuration flags associated with `func`.
     ///
     /// The `name` provided should include the full name of the function
@@ -95,6 +109,9 @@ impl FunctionConfig {
         let mut ret = FunctionFlags::empty();
         self.add_function_flags(resolve, ns, &func.name, &mut ret);
         ret |= wit_flags;
+        if ret.contains(FunctionFlags::IMMEDIATE) {
+            ret.remove(FunctionFlags::ASYNC);
+        }
         ret
     }
 

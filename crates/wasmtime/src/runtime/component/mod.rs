@@ -351,6 +351,14 @@ pub(crate) use self::store::ComponentStoreData;
 ///         //
 ///         // "wasi:clocks/monotonic-clock.wait-until": async | store,
 ///
+///         // `immediate` implements an async WIT import with a synchronous
+///         // Rust function returning its result directly. It preserves the
+///         // async WIT type and both canonical lowering modes, but allocates
+///         // no host future. Store access uses `Access<T, Self>` rather than
+///         // `Accessor<T, Self>`. This flag is for imports only.
+///         //
+///         // "my:local/api.immediate-operation": immediate | trappable,
+///
 ///         // The `tracing` flag indicates that `tracing!` will be used to log
 ///         // entries and exits into this host API. This can assist with
 ///         // debugging or just generally be used to provide logs for the host.
