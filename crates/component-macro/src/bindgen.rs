@@ -160,6 +160,9 @@ impl Parse for Config {
                         imports_configured = true;
                     }
                     Opt::Exports(config, span) => {
+                        config
+                            .validate_exports()
+                            .map_err(|e| Error::new(span, e.to_string()))?;
                         if exports_configured {
                             return Err(Error::new(span, "cannot specify exports configuration"));
                         }
@@ -268,6 +271,7 @@ mod kw {
     syn::custom_keyword!(exports);
     syn::custom_keyword!(store);
     syn::custom_keyword!(trappable);
+    syn::custom_keyword!(immediate);
     syn::custom_keyword!(exact);
 }
 
@@ -534,6 +538,9 @@ fn parse_function_config(input: ParseStream<'_>) -> Result<FunctionConfig> {
                 if l.peek(Token![async]) {
                     input.parse::<Token![async]>()?;
                     flags |= FunctionFlags::ASYNC;
+                } else if l.peek(kw::immediate) {
+                    input.parse::<kw::immediate>()?;
+                    flags |= FunctionFlags::IMMEDIATE;
                 } else if l.peek(kw::tracing) {
                     input.parse::<kw::tracing>()?;
                     flags |= FunctionFlags::TRACING;
@@ -560,7 +567,44 @@ fn parse_function_config(input: ParseStream<'_>) -> Result<FunctionConfig> {
                 }
             }
 
+            if flags.contains(FunctionFlags::ASYNC | FunctionFlags::IMMEDIATE) {
+                return Err(input
+                    .error("`async` and `immediate` host implementations are mutually exclusive"));
+            }
             Ok(FunctionConfigSyntax { filter, flags })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_function_config;
+    use syn::parse::Parser;
+
+    #[test]
+    fn immediate_and_async_are_mutually_exclusive() {
+        for input in [
+            "{ default: async | immediate }",
+            "{ default: immediate | async }",
+        ] {
+            let error = parse_function_config.parse_str(input).unwrap_err();
+            assert!(error.to_string().contains("mutually exclusive"));
+        }
+    }
+
+    #[test]
+    fn immediate_is_rejected_for_exports() {
+        for input in [
+            "{ default: immediate }",
+            "{ \"operation\": immediate | trappable }",
+        ] {
+            let config = parse_function_config.parse_str(input).unwrap();
+            let error = config.validate_exports().unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("host imports, not guest exports")
+            );
         }
     }
 }

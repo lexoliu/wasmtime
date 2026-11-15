@@ -616,6 +616,37 @@ impl<T: 'static> LinkerInstance<'_, T> {
         Ok(())
     }
 
+    /// Defines an `async func` import whose host implementation never suspends.
+    ///
+    /// Like [`Self::func_wrap_concurrent`], this satisfies an async WIT type
+    /// under either synchronous or asynchronous canonical lowering. The closure
+    /// returns its result directly, without allocating a host future. Unlike
+    /// [`Self::func_wrap`], it does not satisfy a synchronous WIT import.
+    /// Resource scopes, reentry and traps follow the concurrent call contract.
+    ///
+    /// Requires [`Config::concurrency_support`](crate::Config::concurrency_support).
+    #[cfg(feature = "component-model-async")]
+    pub fn func_wrap_concurrent_immediate<Params, Return, F>(
+        &mut self,
+        name: &str,
+        f: F,
+    ) -> Result<()>
+    where
+        T: 'static,
+        F: Fn(StoreContextMut<T>, Params) -> Result<Return> + Send + Sync + 'static,
+        Params: ComponentNamedList + Lift + 'static,
+        Return: ComponentNamedList + Lower + 'static,
+    {
+        if !self.engine.tunables().concurrency_support {
+            bail!("concurrent host functions require `Config::concurrency_support`");
+        }
+        self.insert(
+            name,
+            Definition::Func(HostFunc::func_wrap_concurrent_immediate(f)?),
+        )?;
+        Ok(())
+    }
+
     /// Define a new host-provided function using dynamically typed values.
     ///
     /// The `name` provided is the name of the function to define and the
