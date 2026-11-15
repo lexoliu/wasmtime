@@ -437,3 +437,47 @@ async fn data_host_generated_async_preparation_validates_ignored_inputs() -> Res
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn data_host_guest_cancellation_releases_prepared_request() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = Engine::new(&config)?;
+    let component = Component::new(&engine, include_str!("data-host-cancel.wat"))?;
+    let prepared = Arc::new(AtomicUsize::new(0));
+    let mut store = Store::new(&engine, prepared.clone());
+    let mut linker = Linker::<Arc<AtomicUsize>>::new(&engine);
+    linker.root().func_wrap_concurrent_prepare(
+        "f",
+        |prepared, _, ()| {
+            prepared.fetch_add(1, Ordering::SeqCst);
+            Ok(prepared.clone())
+        },
+        |_, request| {
+            Box::pin(async move {
+                std::future::pending::<()>().await;
+                drop(request);
+                Ok(())
+            })
+        },
+    )?;
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "f")?;
+    store
+        .run_concurrent(async |accessor| -> Result<()> {
+            run.call_concurrent(accessor, ()).await?;
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+            Ok(())
+        })
+        .await??;
+    store.assert_concurrent_state_empty();
+    assert_eq!(prepared.load(Ordering::SeqCst), 1);
+    assert_eq!(Arc::strong_count(&prepared), 2);
+    Ok(())
+}
