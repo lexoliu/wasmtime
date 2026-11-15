@@ -401,6 +401,42 @@ impl<'a> CompileInputs<'a> {
             }
         }
 
+        // Both entrypoints are compiled before host imports are known. AOT
+        // instantiation selects the register pair only for a typed sync host.
+        if wasmtime_environ::component::supports_register_host_abi(
+            engine.compiler().unwrap().triple(),
+        ) {
+            for (idx, trampoline) in component.trampolines.iter() {
+                if !component.has_register_signature(idx, types) {
+                    continue;
+                }
+                for abi in [Abi::Wasm, Abi::Array] {
+                    ret.push_input(move |compiler| {
+                        let key = FuncKey::ComponentRegisterTrampoline(abi, idx);
+                        let symbol = format!(
+                            "component-register-trampolines[{}]-{abi:?}-{}",
+                            idx.as_u32(),
+                            trampoline.symbol_name()
+                        );
+                        let function = compiler
+                            .component_compiler()
+                            .compile_component_trampoline(
+                                component, types, key, abi, tunables, &symbol,
+                            )
+                            .with_context(|| format!("failed to compile {symbol}"))?;
+                        Ok(CompileOutput {
+                            key,
+                            function,
+                            symbol,
+                            start_srcloc: FilePos::default(),
+                            translation: None,
+                            func_body: None,
+                        })
+                    });
+                }
+            }
+        }
+
         // If there are any resources defined within this component, the
         // signature for `resource.drop` is mentioned somewhere, and the
         // wasm-to-native trampoline for `resource.drop` hasn't been created yet
@@ -967,7 +1003,9 @@ fn is_inlining_function(key: FuncKey) -> bool {
         | FuncKey::WasmToBuiltinTrampoline(..)
         | FuncKey::PatchableToBuiltinTrampoline(..)
         | FuncKey::ModuleStartup(..) => false,
-        FuncKey::ComponentTrampoline(..) | FuncKey::ResourceDropTrampoline => false,
+        FuncKey::ComponentTrampoline(..)
+        | FuncKey::ComponentRegisterTrampoline(..)
+        | FuncKey::ResourceDropTrampoline => false,
 
         FuncKey::PulleyHostCall(_) => {
             unreachable!("we don't compile artifacts for Pulley host calls")

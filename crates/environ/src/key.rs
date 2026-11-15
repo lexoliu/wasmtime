@@ -50,6 +50,10 @@ pub enum FuncKeyKind {
     /// Initialization function for a module, such as initializing "complicated"
     /// globals and passive element segments.
     ModuleStartup = FuncKey::new_kind(0b1001),
+
+    /// A component trampoline using the scalar host register ABI.
+    #[cfg(feature = "component-model")]
+    ComponentRegisterTrampoline = FuncKey::new_kind(0b1010),
 }
 
 impl From<FuncKeyKind> for u32 {
@@ -81,6 +85,8 @@ impl FuncKeyKind {
 
             #[cfg(feature = "component-model")]
             x if x == Self::ComponentTrampoline.into() => Self::ComponentTrampoline,
+            #[cfg(feature = "component-model")]
+            x if x == Self::ComponentRegisterTrampoline.into() => Self::ComponentRegisterTrampoline,
             #[cfg(feature = "component-model")]
             x if x == Self::ResourceDropTrampoline.into() => Self::ResourceDropTrampoline,
             #[cfg(feature = "component-model")]
@@ -142,7 +148,7 @@ impl FuncKeyNamespace {
             }
 
             #[cfg(feature = "component-model")]
-            FuncKeyKind::ComponentTrampoline => {
+            FuncKeyKind::ComponentTrampoline | FuncKeyKind::ComponentRegisterTrampoline => {
                 let _ = Abi::from_raw(raw & FuncKey::MODULE_MASK);
                 Self(raw)
             }
@@ -253,6 +259,10 @@ pub enum FuncKey {
     #[cfg(feature = "component-model")]
     ComponentTrampoline(Abi, component::TrampolineIndex),
 
+    /// A component trampoline invoking a typed scalar host through registers.
+    #[cfg(feature = "component-model")]
+    ComponentRegisterTrampoline(Abi, component::TrampolineIndex),
+
     /// A Wasm-caller to array-callee `resource.drop` trampoline.
     #[cfg(feature = "component-model")]
     ResourceDropTrampoline,
@@ -342,6 +352,12 @@ impl FuncKey {
                 (namespace, index)
             }
             #[cfg(feature = "component-model")]
+            FuncKey::ComponentRegisterTrampoline(abi, trampoline) => {
+                let namespace =
+                    FuncKeyKind::ComponentRegisterTrampoline.into_raw() | abi.into_raw();
+                (namespace, trampoline.as_u32())
+            }
+            #[cfg(feature = "component-model")]
             FuncKey::ResourceDropTrampoline => {
                 let namespace = FuncKeyKind::ResourceDropTrampoline.into_raw();
                 let index = 0;
@@ -391,7 +407,9 @@ impl FuncKey {
             FuncKey::PatchableToBuiltinTrampoline(_) => Abi::Patchable,
             FuncKey::PulleyHostCall(_) => Abi::Wasm,
             #[cfg(feature = "component-model")]
-            FuncKey::ComponentTrampoline(abi, _) => abi,
+            FuncKey::ComponentTrampoline(abi, _) | FuncKey::ComponentRegisterTrampoline(abi, _) => {
+                abi
+            }
             #[cfg(feature = "component-model")]
             FuncKey::ResourceDropTrampoline => Abi::Wasm,
             #[cfg(feature = "component-model")]
@@ -470,6 +488,12 @@ impl FuncKey {
                 let abi = Abi::from_raw(a & Self::MODULE_MASK);
                 let trampoline = component::TrampolineIndex::from_u32(b);
                 Self::ComponentTrampoline(abi, trampoline)
+            }
+            #[cfg(feature = "component-model")]
+            FuncKeyKind::ComponentRegisterTrampoline => {
+                let abi = Abi::from_raw(a & Self::MODULE_MASK);
+                let trampoline = component::TrampolineIndex::from_u32(b);
+                Self::ComponentRegisterTrampoline(abi, trampoline)
             }
             #[cfg(feature = "component-model")]
             FuncKeyKind::ResourceDropTrampoline => {
@@ -555,7 +579,8 @@ impl FuncKey {
     #[cfg(feature = "component-model")]
     pub fn unwrap_component_trampoline(self) -> (crate::Abi, component::TrampolineIndex) {
         match self {
-            Self::ComponentTrampoline(abi, trampoline) => (abi, trampoline),
+            Self::ComponentTrampoline(abi, trampoline)
+            | Self::ComponentRegisterTrampoline(abi, trampoline) => (abi, trampoline),
             _ => panic!("`FuncKey::unwrap_component_trampoline` called on {self:?}"),
         }
     }
@@ -592,6 +617,7 @@ impl FuncKey {
             | Self::PulleyHostCall(..) => true,
             #[cfg(feature = "component-model")]
             Self::ComponentTrampoline(..)
+            | Self::ComponentRegisterTrampoline(..)
             | Self::ResourceDropTrampoline
             | Self::UnsafeIntrinsic(..) => true,
         }

@@ -31,6 +31,7 @@ use crate::component::*;
 use crate::error::Result;
 use crate::prelude::*;
 use crate::{EntityIndex, EntityRef, ModuleInternedTypeIndex, PrimaryMap, WasmValType};
+use alloc::collections::BTreeMap;
 use cranelift_entity::packed_option::PackedOption;
 use indexmap::IndexMap;
 use info::LinearMemoryOptions;
@@ -627,6 +628,7 @@ impl ComponentDfg {
             unsafe_intrinsics: Default::default(),
             trampolines: Default::default(),
             trampoline_defs: Default::default(),
+            trampoline_lowerings: Default::default(),
             trampoline_map: Default::default(),
             options: Default::default(),
             options_map: Default::default(),
@@ -661,6 +663,7 @@ impl ComponentDfg {
                 initializers: linearize.initializers,
                 unsafe_intrinsics: linearize.unsafe_intrinsics,
                 trampolines: linearize.trampolines,
+                trampoline_lowerings: linearize.trampoline_lowerings,
                 num_lowerings: linearize.num_lowerings,
                 options: linearize.options,
 
@@ -700,6 +703,7 @@ struct LinearizeDfg<'a> {
     unsafe_intrinsics: [PackedOption<ModuleInternedTypeIndex>; UnsafeIntrinsic::len() as usize],
     trampolines: PrimaryMap<TrampolineIndex, ModuleInternedTypeIndex>,
     trampoline_defs: PrimaryMap<TrampolineIndex, info::Trampoline>,
+    trampoline_lowerings: BTreeMap<TrampolineIndex, (LoweredIndex, RuntimeImportIndex)>,
     options: PrimaryMap<OptionsIndex, info::CanonicalOptions>,
     trampoline_map: HashMap<TrampolineIndex, TrampolineIndex>,
     runtime_memories: HashMap<MemoryId, RuntimeMemoryIndex>,
@@ -1216,6 +1220,15 @@ impl LinearizeDfg<'_> {
         let i2 = self.trampoline_defs.push(trampoline);
         assert_eq!(i1, i2);
         self.trampoline_map.insert(index, i1);
+        if let Trampoline::LowerImport { import, .. } = &self.dfg.trampolines[index].1 {
+            let info::Trampoline::LowerImport {
+                index: lowering, ..
+            } = self.trampoline_defs[i1]
+            else {
+                unreachable!();
+            };
+            self.trampoline_lowerings.insert(i1, (lowering, *import));
+        }
         i1
     }
 
