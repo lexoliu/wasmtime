@@ -4,6 +4,7 @@ use crate::component::matching::InstanceType;
 use crate::component::storage::{storage_as_slice, storage_as_slice_mut};
 use crate::hash_map::HashMap;
 use crate::prelude::*;
+use crate::store::StoreOpaque;
 use crate::{AsContextMut, StoreContext, StoreContextMut, ValRaw};
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
@@ -19,6 +20,40 @@ use wasmtime_environ::component::{
     CanonicalAbiInfo, ComponentTypes, InterfaceType, MAX_FLAT_PARAMS, MAX_FLAT_RESULTS,
     OptionsIndex, StringEncoding, TypeMap, VariantInfo,
 };
+
+/// Read-only access to component memory during a synchronous host call.
+///
+/// This context is supplied by
+/// [`LinkerInstance::func_wrap_data_memory`](crate::component::LinkerInstance::func_wrap_data_memory).
+/// It can resolve [`WasmStr`] and [`WasmList`] cursors while the host mutates its
+/// own data, but cannot execute guest code or grow memory. References obtained
+/// through it cannot outlive the host call. String decoding still validates
+/// the contents and may allocate when transcoding from UTF-16 or Latin-1.
+///
+/// Guest references cannot be retained in the store's host data:
+///
+/// ```compile_fail
+/// use wasmtime::{Engine, component::{Linker, WasmList}};
+/// let mut linker = Linker::<&'static [u8]>::new(&Engine::default());
+/// linker.root().func_wrap_data_memory("save", |saved, memory, (bytes,): (WasmList<u8>,)| {
+///     *saved = bytes.as_le_slice_in(memory);
+///     Ok(())
+/// })?;
+/// # Ok::<(), wasmtime::Error>(())
+/// ```
+///
+/// The memory context cannot be used to reenter a guest:
+///
+/// ```compile_fail
+/// use wasmtime::component::{HostMemory, TypedFunc};
+/// fn reenter(func: TypedFunc<(), ()>, memory: HostMemory<'_>) {
+///     func.call(memory, ()).unwrap();
+/// }
+/// ```
+#[derive(Clone, Copy)]
+pub struct HostMemory<'a> {
+    pub(crate) store: &'a StoreOpaque,
+}
 
 /// A statically-typed version of [`Func`] which takes `Params` as input and
 /// returns `Return`.
@@ -1588,7 +1623,17 @@ impl WasmStr {
         &self,
         store: impl Into<StoreContext<'a, T>>,
     ) -> Result<Cow<'a, str>> {
-        let store = store.into().0;
+        self.to_str_in(HostMemory {
+            store: store.into().0,
+        })
+    }
+
+    /// Decode this string using a synchronous host call's memory context.
+    ///
+    /// This performs the same validation as [`Self::to_str`] and panics if the
+    /// cursor belongs to a different store.
+    pub fn to_str_in<'a>(&self, memory: HostMemory<'a>) -> Result<Cow<'a, str>> {
+        let store = memory.store;
         let memory = self.instance.options_memory(store, self.options);
         let encoding = self.instance.options(store, self.options).string_encoding;
         self.to_str_from_memory(encoding, memory)
@@ -1895,7 +1940,15 @@ macro_rules! raw_wasm_list_accessors {
             /// Panics if the `store` provided is not the one from which this
             /// slice originated.
             pub fn as_le_slice<'a, T: 'static>(&self, store: impl Into<StoreContext<'a, T>>) -> &'a [$i] {
-                let memory = self.instance.options_memory(store.into().0, self.options);
+                self.as_le_slice_in(HostMemory { store: store.into().0 })
+            }
+
+            /// Access this list using a synchronous host call's memory context.
+            ///
+            /// Like [`Self::as_le_slice`], elements are in little-endian order
+            /// and a cursor from a different store causes a panic.
+            pub fn as_le_slice_in<'a>(&self, context: HostMemory<'a>) -> &'a [$i] {
+                let memory = self.instance.options_memory(context.store, self.options);
                 self._as_le_slice(memory)
             }
 
