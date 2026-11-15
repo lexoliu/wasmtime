@@ -1,0 +1,143 @@
+use wasmtime::component::{Component, Linker, Resource, ResourceType};
+use wasmtime::{Config, Engine, Result, Store};
+
+mod generated {
+    wasmtime::component::bindgen!({
+        path: "tests/all/component_model/data-host.wit",
+        imports: { default: trappable },
+    });
+
+    impl DataHostImports for u32 {
+        fn increment(&mut self, n: u32) -> wasmtime::Result<u32> {
+            *self += n;
+            Ok(*self)
+        }
+    }
+}
+
+fn engine(concurrent: bool) -> Result<Engine> {
+    let mut config = Config::new();
+    config.concurrency_support(concurrent);
+    Engine::new(&config)
+}
+
+#[test]
+fn data_host_scalar_calls_work_with_and_without_concurrency() -> Result<()> {
+    for concurrent in [false, true] {
+        let engine = engine(concurrent)?;
+        let component = Component::new(&engine, include_str!("data-host.wat"))?;
+        for generated in [false, true] {
+            let mut linker = Linker::<u32>::new(&engine);
+            if generated {
+                generated::DataHost::add_to_linker::<_, wasmtime::component::HasSelf<u32>>(
+                    &mut linker,
+                    |data| data,
+                )?;
+            } else {
+                linker
+                    .root()
+                    .func_wrap_data("increment", |data, (n,): (u32,)| {
+                        *data += n;
+                        Ok((*data,))
+                    })?;
+            }
+            let mut store = Store::new(&engine, 0);
+            let instance = linker.instantiate(&mut store, &component)?;
+            let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+            let mut expected = 0;
+            for n in 0..100 {
+                expected += n;
+                assert_eq!(run.call(&mut store, (n,))?, (expected,));
+            }
+            if concurrent {
+                store.assert_concurrent_state_empty();
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn data_host_preserves_guest_borrow_scope() -> Result<()> {
+    for concurrent in [false, true] {
+        let engine = engine(concurrent)?;
+        let component = Component::new(&engine, include_str!("data-host-resource.wat"))?;
+        let mut linker = Linker::<u32>::new(&engine);
+        linker
+            .root()
+            .resource("item", ResourceType::host::<u32>(), |_, _| {
+                panic!("borrowed resource must not be destroyed")
+            })?;
+        linker
+            .root()
+            .func_wrap_data("inspect", |data, (item,): (Resource<u32>,)| {
+                assert!(!item.owned());
+                *data += item.rep();
+                Ok(())
+            })?;
+        linker
+            .root()
+            .func_wrap_data("increment", |data, (n,): (u32,)| {
+                *data += n;
+                Ok((*data,))
+            })?;
+        let mut store = Store::new(&engine, 0);
+        let instance = linker.instantiate(&mut store, &component)?;
+        let run = instance.get_typed_func::<(Resource<u32>,), ()>(&mut store, "run")?;
+        for _ in 0..100 {
+            run.call(&mut store, (Resource::new_borrow(42),))?;
+            if concurrent {
+                store.assert_concurrent_state_empty();
+            }
+        }
+        assert_eq!(*store.data(), 4900);
+    }
+    Ok(())
+}
+
+#[test]
+fn data_host_scalar_traps_preserve_the_error() -> Result<()> {
+    for concurrent in [false, true] {
+        let engine = engine(concurrent)?;
+        let component = Component::new(&engine, include_str!("data-host.wat"))?;
+        let mut linker = Linker::<()>::new(&engine);
+        linker
+            .root()
+            .func_wrap_data("increment", |_, (_n,): (u32,)| -> Result<(u32,)> {
+                Err(wasmtime::Error::msg("data host trap"))
+            })?;
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate(&mut store, &component)?;
+        let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+        let error = run.call(&mut store, (7,)).expect_err("host traps");
+        assert!(format!("{error:#}").contains("data host trap"));
+        if concurrent {
+            store.assert_concurrent_state_empty();
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn data_host_string_result_preserves_guest_realloc() -> Result<()> {
+    for concurrent in [false, true] {
+        let engine = engine(concurrent)?;
+        let component = Component::new(&engine, include_str!("data-host-string.wat"))?;
+        let mut linker = Linker::<String>::new(&engine);
+        linker
+            .root()
+            .func_wrap_data("text", |text, (): ()| Ok((text.clone(),)))?;
+        let mut store = Store::new(&engine, String::from("中文、日本語、한국어"));
+        let instance = linker.instantiate(&mut store, &component)?;
+        let run = instance.get_typed_func::<(), (String,)>(&mut store, "run")?;
+        let allocations = instance.get_typed_func::<(), (u32,)>(&mut store, "allocations")?;
+        for expected in 1..=10 {
+            assert_eq!(run.call(&mut store, ())?.0, *store.data());
+            assert_eq!(allocations.call(&mut store, ())?, (expected,));
+            if concurrent {
+                store.assert_concurrent_state_empty();
+            }
+        }
+    }
+    Ok(())
+}

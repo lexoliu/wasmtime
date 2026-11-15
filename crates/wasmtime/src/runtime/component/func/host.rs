@@ -66,7 +66,7 @@ type HostFuture<R> = Pin<Box<dyn Future<Output = Result<R>> + Send>>;
 /// Only the future impl references `poll_and_block`/`first_poll`, so
 /// non-concurrent host functions don't instantiate them.
 trait HostOutput<R> {
-    fn finish_sync(self, store: &mut dyn VMStore, host_task: EnteredHostTask) -> Result<R>;
+    fn finish_sync(self, store: &mut dyn VMStore, host_task: Option<EnteredHostTask>) -> Result<R>;
 
     #[cfg(feature = "component-model-async")]
     fn finish_async<T: 'static>(
@@ -82,7 +82,11 @@ trait HostOutput<R> {
 }
 
 impl<R> HostOutput<R> for Result<R> {
-    fn finish_sync(self, _store: &mut dyn VMStore, _host_task: EnteredHostTask) -> Result<R> {
+    fn finish_sync(
+        self,
+        _store: &mut dyn VMStore,
+        _host_task: Option<EnteredHostTask>,
+    ) -> Result<R> {
         self
     }
 
@@ -106,8 +110,12 @@ impl<R> HostOutput<R> for Result<R> {
 
 #[cfg(feature = "component-model-async")]
 impl<R: Send + Sync + 'static> HostOutput<R> for HostFuture<R> {
-    fn finish_sync(self, store: &mut dyn VMStore, host_task: EnteredHostTask) -> Result<R> {
-        concurrent::poll_and_block(store, host_task, self)
+    fn finish_sync(self, store: &mut dyn VMStore, host_task: Option<EnteredHostTask>) -> Result<R> {
+        concurrent::poll_and_block(
+            store,
+            host_task.expect("async host function requires an entered host task"),
+            self,
+        )
     }
 
     fn finish_async<T: 'static>(
@@ -156,6 +164,22 @@ impl HostFunc {
         R: ComponentNamedList + Lower + 'static,
     {
         Self::new(Asyncness::No, StaticHostFn::<_, false>::new(func))
+    }
+
+    /// A synchronous host implementation that cannot access this store.
+    pub(crate) fn func_wrap_data<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>
+    where
+        T: 'static,
+        F: Fn(&mut T, P) -> Result<R> + Send + Sync + 'static,
+        P: ComponentNamedList + Lift + 'static,
+        R: ComponentNamedList + Lower + 'static,
+    {
+        Self::new(
+            Asyncness::No,
+            StaticHostFn::<_, false, true>::new(move |mut store, params| {
+                func(store.data_mut(), params)
+            }),
+        )
     }
 
     /// An async-WIT import whose host implementation completes immediately.
@@ -350,6 +374,9 @@ where
 
     type Output: HostOutput<R>;
 
+    /// The implementation cannot reenter the store or access task resources.
+    const TASK_FREE: bool = false;
+
     /// Performs a type-check to ensure that this host function can be imported
     /// with the provided signature that a component is using.
     fn typecheck(ty: TypeFuncIndex, types: &InstanceType<'_>) -> Result<()>;
@@ -456,6 +483,38 @@ where
         options: OptionsIndex,
         storage: &mut [MaybeUninit<ValRaw>],
     ) -> Result<()> {
+        if Self::TASK_FREE {
+            let mut lift =
+                LiftContext::new_without_scope(store.0.store_opaque_mut(), options, instance);
+            let (params, rest) = self.load_params(&mut lift, ty, MAX_FLAT_PARAMS, storage)?;
+
+            let ret = self
+                .run(store.as_context_mut(), params)
+                .finish_sync(store.0, None)?;
+
+            if store.0.component_trapped() {
+                bail!(crate::Trap::CannotEnterComponent);
+            }
+
+            let mut lower = LowerContext::new_without_realloc(store, options, instance);
+            let fty = &lower.types[ty];
+            let result_tys = &lower.types[fty.results];
+            let dst = if let Some(cnt) = result_tys.abi.flat_count(MAX_FLAT_RESULTS) {
+                Destination::Flat(&mut storage[..cnt])
+            } else {
+                // SAFETY: due to the contract of `entrypoint` we know that the
+                // return pointer, located after the parameters, is initialized
+                // by wasm and safe to read.
+                let ptr = unsafe { rest[0].assume_init_ref() };
+                Destination::Memory(validate_inbounds_dynamic(
+                    &result_tys.abi,
+                    lower.as_slice(),
+                    ptr,
+                )?)
+            };
+            return Self::lower_result(&mut lower, ty, ret, dst);
+        }
+
         let entered_host_task = store.0.host_task_create()?;
 
         let mut lift = LiftContext::new(store.0.store_opaque_mut(), options, instance)?;
@@ -463,7 +522,7 @@ where
 
         let ret = self
             .run(store.as_context_mut(), params)
-            .finish_sync(store.0, entered_host_task)?;
+            .finish_sync(store.0, Some(entered_host_task))?;
 
         // If the store was poisoned while the host function ran, e.g. because
         // it made a nested call back into the guest which failed but then
@@ -652,9 +711,9 @@ fn typecheck_async(host_async: bool, wit_async: bool) -> Result<()> {
 /// Implementation of a "static" host function where the parameters and results
 /// of a function are known at compile time.
 #[repr(transparent)]
-struct StaticHostFn<F, const ASYNC: bool>(F);
+struct StaticHostFn<F, const ASYNC: bool, const DATA_ONLY: bool = false>(F);
 
-impl<F, const ASYNC: bool> StaticHostFn<F, ASYNC> {
+impl<F, const ASYNC: bool, const DATA_ONLY: bool> StaticHostFn<F, ASYNC, DATA_ONLY> {
     fn new<T, P, R, O>(func: F) -> Self
     where
         T: 'static,
@@ -667,7 +726,8 @@ impl<F, const ASYNC: bool> StaticHostFn<F, ASYNC> {
     }
 }
 
-impl<T, F, P, R, O, const ASYNC: bool> HostFn<T, P, R> for StaticHostFn<F, ASYNC>
+impl<T, F, P, R, O, const ASYNC: bool, const DATA_ONLY: bool> HostFn<T, P, R>
+    for StaticHostFn<F, ASYNC, DATA_ONLY>
 where
     T: 'static,
     F: Fn(StoreContextMut<'_, T>, P) -> O,
@@ -679,6 +739,12 @@ where
     const RESULT_MAY_REQUIRE_REALLOC: bool = R::MAY_REQUIRE_REALLOC;
 
     type Output = O;
+
+    const TASK_FREE: bool = DATA_ONLY
+        && !ASYNC
+        && !P::MAY_REQUIRE_RESOURCE
+        && !R::MAY_REQUIRE_RESOURCE
+        && !R::MAY_REQUIRE_REALLOC;
 
     fn typecheck(ty: TypeFuncIndex, types: &InstanceType<'_>) -> Result<()> {
         let ty = &types.types[ty];

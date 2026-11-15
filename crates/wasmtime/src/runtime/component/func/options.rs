@@ -85,7 +85,7 @@ impl<'a, T: 'static> LowerContext<'a, T> {
     /// require no allocations) into already-allocated memory or into stack
     /// slots, in which case the lowering may safely be done outside of a fiber
     /// since there is no need to make any guest calls.
-    #[cfg(feature = "component-model-async")]
+    #[allow(dead_code, reason = "used byTASK_FREE sync lowers and async lowers")]
     pub(crate) fn new_without_realloc(
         store: StoreContextMut<'a, T>,
         options: OptionsIndex,
@@ -439,6 +439,39 @@ impl<'a> LiftContext<'a> {
             host_resource_data,
             hostcall_fuel,
         })
+    }
+
+    /// Creates a lifting context for a `TASK_FREE` host call whose signature
+    /// carries no resources, streams, futures, or error contexts, avoiding
+    /// computing `current_scope` or forcing a deferred guest thread.
+    #[inline]
+    pub(crate) fn new_without_scope(
+        store: &'a mut StoreOpaque,
+        options: OptionsIndex,
+        instance_handle: Instance,
+    ) -> LiftContext<'a> {
+        let store_id = store.id();
+        let hostcall_fuel = store.hostcall_fuel();
+        let memory =
+            instance_handle.options_memory(unsafe { &*(store as *const StoreOpaque) }, options);
+        let (task_state, host_table, handle_counter, host_resource_data, instance) =
+            store.lift_context_parts(instance_handle);
+        let (component, instance) = instance.component_and_self();
+
+        LiftContext {
+            store_id,
+            current_scope: None,
+            memory,
+            options,
+            types: component.types(),
+            instance,
+            instance_handle,
+            task_state,
+            host_table,
+            handle_counter,
+            host_resource_data,
+            hostcall_fuel,
+        }
     }
 
     /// Returns the canonical options that are being used during lifting.
