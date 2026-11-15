@@ -1,3 +1,4 @@
+use object::{Object, ObjectSymbol};
 use wasmtime::component::{Component, Linker, Val};
 use wasmtime::{Config, Engine, Result, Store};
 
@@ -8,6 +9,21 @@ fn typed_and_dynamic_scalar_hosts_after_aot() -> Result<()> {
         config.concurrency_support(concurrent);
         let engine = Engine::new(&config)?;
         let artifact = engine.precompile_component(include_bytes!("register-host.wat"))?;
+        let object = object::File::parse(&*artifact)?;
+        let register_symbols = object
+            .symbols()
+            .filter(|symbol| {
+                symbol
+                    .name()
+                    .is_ok_and(|name| name.starts_with("component-register-trampolines["))
+            })
+            .count();
+        if wasmtime_environ::component::supports_register_host_abi(&target_lexicon::HOST) {
+            // Four imports, each with a Wasm and an array entrypoint.
+            assert_eq!(register_symbols, 8);
+        } else {
+            assert_eq!(register_symbols, 0);
+        }
         // The bytes come from this engine's compiler, not an untrusted artifact.
         let component = unsafe { Component::deserialize(&engine, &artifact)? };
         for dynamic in [false, true] {
@@ -68,5 +84,47 @@ fn typed_and_dynamic_scalar_hosts_after_aot() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn maximum_flat_parameters_preserve_argument_order() -> Result<()> {
+    type Args = (
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+    );
+    let expected: Args = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, u64::MAX);
+    let engine = Engine::default();
+    let component = Component::new(&engine, include_str!("register-host-many.wat"))?;
+    let mut linker = Linker::new(&engine);
+    linker
+        .root()
+        .func_wrap_data("many", move |_: &mut (), args: Args| {
+            // Rust tuple Debug/PartialEq implementations stop before this arity.
+            let (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) = args;
+            assert_eq!(
+                [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p],
+                [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, u64::MAX]
+            );
+            Ok((p,))
+        })?;
+    let mut store = Store::new(&engine, ());
+    let instance = linker.instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<Args, (u64,)>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, expected)?, (u64::MAX,));
     Ok(())
 }

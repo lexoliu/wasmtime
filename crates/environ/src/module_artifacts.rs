@@ -814,7 +814,7 @@ mod tests {
             // Build up a random set of functions with random indices.
             for _ in 0..u.int_in_range(1..=200)? {
                 #[cfg(feature = "component-model")]
-                let choice = u.int_in_range(0..=6)?;
+                let choice = u.int_in_range(0..=7)?;
                 #[cfg(not(feature = "component-model"))]
                 let choice = u.int_in_range(0..=4)?;
 
@@ -828,6 +828,8 @@ mod tests {
                     5 => FuncKey::ComponentTrampoline(u.arbitrary()?, idx(u, 50)?),
                     #[cfg(feature = "component-model")]
                     6 => FuncKey::ResourceDropTrampoline,
+                    #[cfg(feature = "component-model")]
+                    7 => FuncKey::ComponentRegisterTrampoline(u.arbitrary()?, idx(u, 50)?),
                     _ => unreachable!(),
                 };
                 funcs.push(key);
