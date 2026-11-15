@@ -12,6 +12,7 @@ mod r#async;
 mod async_dynamic;
 mod bindgen;
 mod call_hook;
+mod data_host;
 mod dynamic;
 mod fixed_length_list;
 mod func;

@@ -504,6 +504,22 @@ impl<T: 'static> LinkerInstance<'_, T> {
         Ok(())
     }
 
+    /// Defines a synchronous host function with access to the store's data.
+    ///
+    /// Unlike [`Self::func_wrap`], the closure cannot access the store itself
+    /// and therefore cannot reenter guest code. Scalar signatures can avoid
+    /// allocating a component host task. Signatures involving resources or
+    /// guest allocation retain the ordinary host-task lifecycle.
+    pub fn func_wrap_data<F, Params, Return>(&mut self, name: &str, func: F) -> Result<()>
+    where
+        F: Fn(&mut T, Params) -> Result<Return> + Send + Sync + 'static,
+        Params: ComponentNamedList + Lift + 'static,
+        Return: ComponentNamedList + Lower + 'static,
+    {
+        self.insert(name, Definition::Func(HostFunc::func_wrap_data(func)?))?;
+        Ok(())
+    }
+
     /// Defines a new host-provided async function into this [`LinkerInstance`].
     ///
     /// This function is similar to [`Self::func_wrap`] except it takes an async
