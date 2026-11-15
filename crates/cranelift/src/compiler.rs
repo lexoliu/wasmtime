@@ -688,7 +688,9 @@ impl wasmtime_environ::Compiler for Compiler {
 
             FuncKey::PulleyHostCall(_) => unreachable!(),
 
-            FuncKey::ComponentTrampoline(..) | FuncKey::UnsafeIntrinsic(..) => {
+            FuncKey::ComponentTrampoline(..)
+            | FuncKey::ComponentRegisterTrampoline(..)
+            | FuncKey::UnsafeIntrinsic(..) => {
                 unreachable!()
             }
 

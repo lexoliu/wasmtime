@@ -792,8 +792,24 @@ impl<'a> Instantiator<'a> {
         // will require. These functions won't actually get used until their
         // associated state has been initialized through the global initializers
         // below, but the funcrefs can all be configured here.
+        let mut register_lowerings = alloc::collections::BTreeSet::new();
         for (idx, sig) in env_component.trampolines.iter() {
-            let ptrs = self.component.trampoline_ptrs(idx);
+            let register =
+                env_component
+                    .trampoline_lowerings
+                    .get(&idx)
+                    .and_then(|(lowering, import)| {
+                        let RuntimeImport::Func(func) = &self.imports[*import] else {
+                            unreachable!()
+                        };
+                        if !func.has_register_entrypoint() {
+                            return None;
+                        }
+                        let ptrs = self.component.register_trampoline_ptrs(idx)?;
+                        register_lowerings.insert(*lowering);
+                        Some(ptrs)
+                    });
+            let ptrs = register.unwrap_or_else(|| self.component.trampoline_ptrs(idx));
             let signature = match self.component.signatures().shared_type(*sig) {
                 Some(s) => s,
                 None => panic!("found unregistered signature: {sig:?}"),
@@ -906,7 +922,7 @@ impl<'a> Instantiator<'a> {
                         _ => unreachable!(),
                     };
                     self.instance_mut(store.0)
-                        .set_lowering(*index, func.lowering());
+                        .set_lowering(*index, func.lowering(register_lowerings.contains(index)));
                 }
 
                 GlobalInitializer::ExtractTable(table) => self.extract_table(store.0, table),

@@ -11,9 +11,9 @@ use crate::component::types::ComponentFunc;
 use crate::component::{ComponentNamedList, HostMemory, Instance, Lift, Lower, Val};
 use crate::prelude::*;
 use crate::runtime::vm::component::{
-    ComponentInstance, VMComponentContext, VMLowering, VMLoweringCallee,
+    ComponentInstance, VMComponentContext, VMLowering, VMLoweringCallee, VMLoweringFunction,
 };
-use crate::runtime::vm::{VMOpaqueContext, VMStore};
+use crate::runtime::vm::{SendSyncPtr, VMOpaqueContext, VMStore};
 use crate::store::Asyncness;
 use crate::{AsContextMut, CallHook, StoreContextMut, ValRaw};
 use alloc::sync::Arc;
@@ -34,6 +34,7 @@ use wasmtime_environ::component::{
 pub struct HostFunc {
     /// The raw function pointer which Cranelift will invoke.
     entrypoint: VMLoweringCallee,
+    register_entrypoint: Option<SendSyncPtr<VMLoweringFunction>>,
 
     /// The implementation of type-checking to ensure that this function
     /// ascribes to the provided function type.
@@ -84,6 +85,11 @@ impl HostFunc {
     {
         Ok(try_new::<Arc<_>>(HostFunc {
             entrypoint: F::cabi_entrypoint,
+            register_entrypoint: if matches!(asyncness, Asyncness::No) {
+                F::register_entrypoint()
+            } else {
+                None
+            },
             typecheck: F::typecheck,
             func: try_new::<Box<_>>(func)?,
             asyncness,
@@ -332,10 +338,18 @@ impl HostFunc {
         (self.typecheck)(ty, types)
     }
 
-    pub fn lowering(&self) -> VMLowering {
+    pub fn has_register_entrypoint(&self) -> bool {
+        self.register_entrypoint.is_some()
+    }
+
+    pub fn lowering(&self, registers: bool) -> VMLowering {
         let data = NonNull::from(&*self.func).cast();
         VMLowering {
-            callee: NonNull::new(self.entrypoint as *mut _).unwrap().into(),
+            callee: if registers {
+                self.register_entrypoint.unwrap().into()
+            } else {
+                NonNull::new(self.entrypoint as *mut _).unwrap().into()
+            },
             data: data.into(),
         }
     }
@@ -379,6 +393,10 @@ where
 
     /// The implementation cannot reenter the store or access task resources.
     const TASK_FREE: bool = false;
+
+    fn register_entrypoint() -> Option<SendSyncPtr<VMLoweringFunction>> {
+        None
+    }
 
     /// Performs a type-check to ensure that this host function can be imported
     /// with the provided signature that a component is using.
@@ -445,6 +463,70 @@ where
 
                 res
             })
+        }
+    }
+
+    /// The synchronous scalar path shares lifting, lowering, resource scopes,
+    /// call hooks and trap handling with the canonical array entrypoint.
+    #[inline]
+    unsafe fn register_call(
+        cx: NonNull<VMOpaqueContext>,
+        data: NonNull<u8>,
+        ty: u32,
+        options: u32,
+        params: &[ValRaw],
+    ) -> RegisterResult
+    where
+        Self: Sized,
+    {
+        let mut bits = 0;
+        let cx = unsafe { VMComponentContext::from_opaque(cx) };
+        let success = unsafe {
+            ComponentInstance::enter_host_from_wasm(cx, |store, instance| {
+                let mut store = store.unchecked_context_mut();
+                let ty = TypeFuncIndex::from_u32(ty);
+                let options = OptionsIndex::from_u32(options);
+                let data = data.cast::<Self>().as_ref();
+                store.0.call_hook(CallHook::CallingHost)?;
+                let result: Result<()> = (|| {
+                    let task = if Self::TASK_FREE {
+                        None
+                    } else {
+                        Some(store.0.host_task_create()?)
+                    };
+                    let mut lift = LiftContext::new(store.0.store_opaque_mut(), options, instance)?;
+                    let params = Self::lift_params(&mut lift, ty, Source::Flat(params))?;
+                    let value = match data.run(store.as_context_mut(), params) {
+                        HostResult::Done(result) => result?,
+                        #[cfg(feature = "component-model-async")]
+                        HostResult::Future(_) => {
+                            unreachable!("register entrypoints require synchronous hosts")
+                        }
+                    };
+                    // Canonical scalar results occupy at most one flat slot.
+                    // Initializing the empty-result slot also gives it a defined return word.
+                    let mut result = [MaybeUninit::new(ValRaw::u64(0))];
+                    let mut lower = LowerContext::new(store.as_context_mut(), options, instance);
+                    Self::lower_result_and_exit_call(
+                        &mut lower,
+                        ty,
+                        Some(value),
+                        Destination::Flat(&mut result),
+                        task.is_some(),
+                    )?;
+                    if let Some(task) = task {
+                        store.0.host_task_delete(task)?;
+                    }
+                    bits = result[0].assume_init_ref().get_u64();
+                    Ok(())
+                })();
+                store.0.call_hook(CallHook::ReturningFromHost)?;
+                result
+            })
+        };
+        RegisterResult {
+            bits,
+            success: u64::from(success),
         }
     }
 
@@ -763,6 +845,33 @@ where
         && !R::MAY_REQUIRE_RESOURCE
         && !R::MAY_REQUIRE_REALLOC;
 
+    fn register_entrypoint() -> Option<SendSyncPtr<VMLoweringFunction>> {
+        if ASYNC {
+            return None;
+        }
+        let ptr = match P::ABI.flat_count(MAX_FLAT_PARAMS)? {
+            0 => register_0::<T, Self, P, R> as *mut VMLoweringFunction,
+            1 => register_1::<T, Self, P, R> as *mut VMLoweringFunction,
+            2 => register_2::<T, Self, P, R> as *mut VMLoweringFunction,
+            3 => register_3::<T, Self, P, R> as *mut VMLoweringFunction,
+            4 => register_4::<T, Self, P, R> as *mut VMLoweringFunction,
+            5 => register_5::<T, Self, P, R> as *mut VMLoweringFunction,
+            6 => register_6::<T, Self, P, R> as *mut VMLoweringFunction,
+            7 => register_7::<T, Self, P, R> as *mut VMLoweringFunction,
+            8 => register_8::<T, Self, P, R> as *mut VMLoweringFunction,
+            9 => register_9::<T, Self, P, R> as *mut VMLoweringFunction,
+            10 => register_10::<T, Self, P, R> as *mut VMLoweringFunction,
+            11 => register_11::<T, Self, P, R> as *mut VMLoweringFunction,
+            12 => register_12::<T, Self, P, R> as *mut VMLoweringFunction,
+            13 => register_13::<T, Self, P, R> as *mut VMLoweringFunction,
+            14 => register_14::<T, Self, P, R> as *mut VMLoweringFunction,
+            15 => register_15::<T, Self, P, R> as *mut VMLoweringFunction,
+            16 => register_16::<T, Self, P, R> as *mut VMLoweringFunction,
+            _ => unreachable!(),
+        };
+        Some(SendSyncPtr::new(NonNull::new(ptr).unwrap()))
+    }
+
     fn typecheck(ty: TypeFuncIndex, types: &InstanceType<'_>) -> Result<()> {
         let ty = &types.types[ty];
         typecheck_async(ASYNC, ty.async_)?;
@@ -937,3 +1046,123 @@ pub(crate) fn validate_inbounds_dynamic(
     }
     Ok(ptr)
 }
+
+/// Native C aggregate returned in two integer registers on the targets selected
+/// by `supports_register_host_abi`. No field contains an uninitialized value.
+#[repr(C)]
+struct RegisterResult {
+    bits: u64,
+    success: u64,
+}
+
+macro_rules! register_entry {
+    ($name:ident $(, $arg:ident)*) => {
+        unsafe extern "C" fn $name<T, F, P, R>(
+            cx: NonNull<VMOpaqueContext>, data: NonNull<u8>, ty: u32, options: u32,
+            $($arg: u64),*
+        ) -> RegisterResult
+        where T: 'static, R: Send + Sync + 'static, F: HostFn<T, P, R>,
+        {
+            // The selected trampoline and the typed host agree on arity and
+            // scalar bit patterns; canonical lifting still validates values.
+            unsafe { F::register_call(cx, data, ty, options, &[$(ValRaw::u64($arg)),*]) }
+        }
+    };
+}
+register_entry!(register_0);
+register_entry!(register_1, a0);
+register_entry!(register_2, a0, a1);
+register_entry!(register_3, a0, a1, a2);
+register_entry!(register_4, a0, a1, a2, a3);
+register_entry!(register_5, a0, a1, a2, a3, a4);
+register_entry!(register_6, a0, a1, a2, a3, a4, a5);
+register_entry!(register_7, a0, a1, a2, a3, a4, a5, a6);
+register_entry!(register_8, a0, a1, a2, a3, a4, a5, a6, a7);
+register_entry!(register_9, a0, a1, a2, a3, a4, a5, a6, a7, a8);
+register_entry!(register_10, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+register_entry!(register_11, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+register_entry!(
+    register_12,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10,
+    a11
+);
+register_entry!(
+    register_13,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10,
+    a11,
+    a12
+);
+register_entry!(
+    register_14,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10,
+    a11,
+    a12,
+    a13
+);
+register_entry!(
+    register_15,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10,
+    a11,
+    a12,
+    a13,
+    a14
+);
+register_entry!(
+    register_16,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    a8,
+    a9,
+    a10,
+    a11,
+    a12,
+    a13,
+    a14,
+    a15
+);

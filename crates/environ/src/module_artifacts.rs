@@ -559,6 +559,7 @@ impl CompiledFunctionsTable {
             // never classified here; group it with the other intrinsics.
             #[cfg(feature = "component-model")]
             FuncKeyKind::ComponentTrampoline
+            | FuncKeyKind::ComponentRegisterTrampoline
             | FuncKeyKind::ResourceDropTrampoline
             | FuncKeyKind::UnsafeIntrinsic => true,
         }
@@ -576,6 +577,7 @@ impl CompiledFunctionsTable {
             | FuncKeyKind::ModuleStartup => false,
             #[cfg(feature = "component-model")]
             FuncKeyKind::ComponentTrampoline
+            | FuncKeyKind::ComponentRegisterTrampoline
             | FuncKeyKind::ResourceDropTrampoline
             | FuncKeyKind::UnsafeIntrinsic => false,
         }
