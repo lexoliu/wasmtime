@@ -646,6 +646,11 @@ fn parse_function_config(input: ParseStream<'_>) -> Result<FunctionConfig> {
                 return Err(input
                     .error("`async` and `immediate` host implementations are mutually exclusive"));
             }
+            if flags.contains(FunctionFlags::BORROWED | FunctionFlags::IMMEDIATE) {
+                return Err(input.error(
+                    "`borrowed` and `immediate` host implementations are mutually exclusive",
+                ));
+            }
             if flags.contains(FunctionFlags::BORROWED)
                 && flags.intersects(FunctionFlags::ASYNC | FunctionFlags::STORE)
             {
@@ -674,6 +679,11 @@ mod tests {
                     .contains("synchronous host without `store`")
             );
         }
+        assert!(
+            parse_function_config
+                .parse_str("{ default: borrowed | immediate }")
+                .is_err()
+        );
         let config = parse_function_config
             .parse_str("{ default: borrowed }")
             .unwrap();

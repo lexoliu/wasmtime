@@ -1,0 +1,4 @@
+package test:borrowed-prepare;
+world borrowed-prepare {
+    import inspect: async func(text: string, bytes: list<u8>) -> u32;
+}

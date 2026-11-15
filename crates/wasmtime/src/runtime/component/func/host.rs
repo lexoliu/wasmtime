@@ -132,6 +132,40 @@ impl<R: Send + Sync + 'static> HostOutput<R> for HostFuture<R> {
     }
 }
 
+#[cfg(feature = "component-model-async")]
+enum PreparedHostFuture<R> {
+    Err(Error),
+    Future(HostFuture<R>),
+}
+
+#[cfg(feature = "component-model-async")]
+impl<R: Send + Sync + 'static> HostOutput<R> for PreparedHostFuture<R> {
+    fn finish_sync(self, store: &mut dyn VMStore, host_task: Option<EnteredHostTask>) -> Result<R> {
+        match self {
+            Self::Err(error) => Err(error),
+            Self::Future(future) => future.finish_sync(store, host_task),
+        }
+    }
+
+    fn finish_async<T: 'static>(
+        self,
+        store: StoreContextMut<'_, T>,
+        instance: Instance,
+        host_task: EnteredHostTask,
+        may_require_realloc: bool,
+        lower: impl FnOnce(StoreContextMut<T>, Option<R>, bool, Option<TableId<HostTask>>) -> Result<()>
+        + Send
+        + 'static,
+    ) -> Result<u32> {
+        match self {
+            Self::Err(error) => Err(error),
+            Self::Future(future) => {
+                future.finish_async(store, instance, host_task, may_require_realloc, lower)
+            }
+        }
+    }
+}
+
 impl HostFunc {
     /// Creates a new host function based on the implementation of `func`.
     ///
@@ -251,6 +285,44 @@ impl HostFunc {
             StaticHostFn::<_, true>::new(move |store: StoreContextMut<'_, T>, params| {
                 let func = func.clone();
                 Box::pin(store.wrap_call(move |accessor| func(accessor, params))) as HostFuture<R>
+            }),
+        )
+    }
+
+    /// Prepare borrowed inputs synchronously before creating the host future.
+    #[cfg(feature = "component-model-async")]
+    pub(crate) fn func_wrap_concurrent_prepare<T, Prepare, F, P, Prepared, R>(
+        prepare: Prepare,
+        func: F,
+    ) -> Result<Arc<HostFunc>>
+    where
+        T: 'static,
+        Prepare: Fn(&mut T, HostMemory<'_>, P) -> Result<Prepared> + Send + Sync + 'static,
+        F: Fn(&Accessor<T>, Prepared) -> Pin<Box<dyn Future<Output = Result<R>> + Send + '_>>
+            + Send
+            + Sync
+            + 'static,
+        P: ComponentNamedList + Lift + 'static,
+        Prepared: Send + Sync + 'static,
+        R: ComponentNamedList + Lower + 'static,
+    {
+        let func = Arc::new(func);
+        Self::new(
+            Asyncness::Yes,
+            StaticHostFn::<_, true>::new(move |store: StoreContextMut<'_, T>, params| {
+                let prepared = {
+                    let (data, opaque) = store.0.data_and_opaque();
+                    prepare(data, HostMemory { store: opaque }, params)
+                };
+                match prepared {
+                    Err(error) => PreparedHostFuture::Err(error),
+                    Ok(prepared) => {
+                        let func = func.clone();
+                        PreparedHostFuture::Future(Box::pin(
+                            store.wrap_call(move |accessor| func(accessor, prepared)),
+                        ))
+                    }
+                }
             }),
         )
     }

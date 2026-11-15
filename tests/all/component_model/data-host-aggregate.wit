@@ -1,0 +1,8 @@
+package test:borrowed-aggregate;
+world borrowed-aggregate {
+    record payload { text: string, bytes: list<u8> }
+    variant choice { empty, value(payload) }
+    import inspect: func(value: payload) -> u32;
+    import inspect-choice: func(value: option<choice>);
+    import inspect-list: func(value: list<tuple<string, list<u8>>>);
+}
