@@ -383,8 +383,8 @@ impl Wasmtime {
                     self.borrowed_input_types.extend(live.iter());
                 }
                 if flags.contains(FunctionFlags::BORROWED)
-                    && !func.kind.is_async()
-                    && flags.intersects(FunctionFlags::ASYNC | FunctionFlags::STORE)
+                    && !flags.contains(FunctionFlags::ASYNC)
+                    && flags.contains(FunctionFlags::STORE)
                 {
                     anyhow::bail!(
                         "`borrowed` requires a synchronous host without `store`: {}",
@@ -2936,6 +2936,8 @@ pub fn add_to_linker<T, D>(
             "{linker}.{}(\"{}\", ",
             if flags.contains(FunctionFlags::BORROWED) && func.kind.is_async() {
                 "func_wrap_concurrent_prepare"
+            } else if flags.contains(FunctionFlags::BORROWED | FunctionFlags::ASYNC) {
+                "func_wrap_async_prepare"
             } else if flags.contains(FunctionFlags::BORROWED) {
                 "func_wrap_data_memory"
             } else if func.kind.is_async() && flags.contains(FunctionFlags::IMMEDIATE) {
@@ -2951,7 +2953,7 @@ pub fn add_to_linker<T, D>(
             },
             func.name
         );
-        if flags.contains(FunctionFlags::BORROWED) && func.kind.is_async() {
+        if flags.contains(FunctionFlags::BORROWED | FunctionFlags::ASYNC) {
             self.generate_host_input_prepare(owner, func, flags)?;
             self.src.push_str(", ");
         }
@@ -2979,14 +2981,21 @@ pub fn add_to_linker<T, D>(
         let data_only =
             !func.kind.is_async() && !flags.intersects(FunctionFlags::ASYNC | FunctionFlags::STORE);
         let wt = self.generator.wasmtime_path();
-        let prepared = func.kind.is_async() && flags.contains(FunctionFlags::BORROWED);
+        let prepared = flags.contains(FunctionFlags::BORROWED | FunctionFlags::ASYNC);
         if prepared {
             let host_trait = self.host_input_trait(owner, func);
             let input = Self::host_prepared_name(func)?;
-            uwrite!(
-                self.src,
-                "move |caller: &{wt}::component::Accessor::<T>, prepared: <D as {host_trait}WithStore<T>>::{input}| {{\n"
-            );
+            if func.kind.is_async() {
+                uwrite!(
+                    self.src,
+                    "move |caller: &{wt}::component::Accessor::<T>, prepared: <D as {host_trait}WithStore<T>>::{input}| {{\n"
+                );
+            } else {
+                uwrite!(
+                    self.src,
+                    "move |mut caller: {wt}::StoreContextMut<'_, T>, prepared: <D as {host_trait}WithStore<T>>::{input}| {{\n"
+                );
+            }
         } else {
             if func.kind.is_async() && !flags.contains(FunctionFlags::IMMEDIATE) {
                 uwrite!(self.src, "move |caller: &{wt}::component::Accessor::<T>, (");
@@ -3225,7 +3234,7 @@ pub fn add_to_linker<T, D>(
     fn generate_function_trait_sig(&mut self, func: &Function, flags: FunctionFlags) -> Result<()> {
         let wt = self.generator.wasmtime_path();
         self.rustdoc(&func.docs);
-        let prepared = func.kind.is_async() && flags.contains(FunctionFlags::BORROWED);
+        let prepared = flags.contains(FunctionFlags::BORROWED | FunctionFlags::ASYNC);
         if prepared {
             let input = Self::host_prepared_name(func)?;
             let name = rust_function_name(func)?;

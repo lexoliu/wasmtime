@@ -273,6 +273,39 @@ impl HostFunc {
         )
     }
 
+    /// A sync-WIT async host with borrowed input preparation before suspension.
+    #[cfg(feature = "async")]
+    pub(crate) fn func_wrap_async_prepare<T, P, Prepared, R, Prepare, Execute>(
+        prepare: Prepare,
+        execute: Execute,
+    ) -> Result<Arc<HostFunc>>
+    where
+        T: 'static,
+        P: ComponentNamedList + Lift + 'static,
+        Prepared: Send + Sync + 'static,
+        R: ComponentNamedList + Lower + 'static,
+        Prepare: Fn(&mut T, HostMemory<'_>, P) -> Result<Prepared> + Send + Sync + 'static,
+        Execute: Fn(StoreContextMut<'_, T>, Prepared) -> Box<dyn Future<Output = Result<R>> + Send + '_>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::new(
+            Asyncness::Yes,
+            StaticHostFn::<_, false>::new(move |store: StoreContextMut<'_, T>, params| {
+                let prepared = {
+                    let (data, opaque) = store.0.data_and_opaque();
+                    prepare(data, HostMemory { store: opaque }, params)
+                };
+                prepared.and_then(|prepared| {
+                    store
+                        .block_on(|store| Pin::from(execute(store, prepared)))
+                        .and_then(|r| r)
+                })
+            }),
+        )
+    }
+
     /// Equivalent for `Linker::func_wrap_concurrent`
     #[cfg(feature = "component-model-async")]
     pub(crate) fn func_wrap_concurrent<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>

@@ -745,6 +745,51 @@ impl<T: 'static> LinkerInstance<'_, T> {
         Ok(())
     }
 
+    /// Defines an async host for synchronous WIT with borrowed input preparation.
+    ///
+    /// `prepare` receives separate host data and read-only guest memory, and
+    /// cannot reenter the guest. It must decode cursor inputs even when they
+    /// are ignored. The owned prepared value is the only input passed to
+    /// `execute`, so a guest-memory borrow cannot cross suspension. Preparation
+    /// errors trap before creating the future; cancellation drops its owned
+    /// request. The ordinary resource scope and async host lifecycle are retained.
+    ///
+    /// ```compile_fail
+    /// use wasmtime::{Engine, component::{Linker, WasmList}};
+    /// let mut linker = Linker::<()>::new(&Engine::default());
+    /// linker.root().func_wrap_async_prepare(
+    ///     "write",
+    ///     |_, memory, (bytes,): (WasmList<u8>,)| Ok(bytes.as_le_slice_in(memory)),
+    ///     |_, bytes| Box::new(async move { let _ = bytes; Ok(()) }),
+    /// ).unwrap();
+    /// ```
+    #[cfg(feature = "async")]
+    pub fn func_wrap_async_prepare<Params, Prepared, Return, Prepare, Execute>(
+        &mut self,
+        name: &str,
+        prepare: Prepare,
+        execute: Execute,
+    ) -> Result<()>
+    where
+        Params: ComponentNamedList + Lift + 'static,
+        Prepared: Send + Sync + 'static,
+        Return: ComponentNamedList + Lower + 'static,
+        Prepare: Fn(&mut T, HostMemory<'_>, Params) -> Result<Prepared> + Send + Sync + 'static,
+        Execute: Fn(
+                StoreContextMut<'_, T>,
+                Prepared,
+            ) -> Box<dyn Future<Output = Result<Return>> + Send + '_>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.insert(
+            name,
+            Definition::Func(HostFunc::func_wrap_async_prepare(prepare, execute)?),
+        )?;
+        Ok(())
+    }
+
     /// Defines a concurrent host function with synchronous input preparation.
     ///
     /// `prepare` runs before the host future is created. It can decode borrowed

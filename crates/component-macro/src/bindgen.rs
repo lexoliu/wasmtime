@@ -652,7 +652,8 @@ fn parse_function_config(input: ParseStream<'_>) -> Result<FunctionConfig> {
                 ));
             }
             if flags.contains(FunctionFlags::BORROWED)
-                && flags.intersects(FunctionFlags::ASYNC | FunctionFlags::STORE)
+                && flags.contains(FunctionFlags::STORE)
+                && !flags.contains(FunctionFlags::ASYNC)
             {
                 return Err(input.error("`borrowed` requires a synchronous host without `store`"));
             }
@@ -667,11 +668,8 @@ mod tests {
     use syn::parse::Parser;
 
     #[test]
-    fn borrowed_requires_a_synchronous_data_host() {
-        for input in [
-            "{ default: borrowed | async }",
-            "{ default: store | borrowed }",
-        ] {
+    fn borrowed_requires_data_only_preparation() {
+        for input in ["{ default: store | borrowed }"] {
             let error = parse_function_config.parse_str(input).unwrap_err();
             assert!(
                 error
@@ -683,6 +681,11 @@ mod tests {
             parse_function_config
                 .parse_str("{ default: borrowed | immediate }")
                 .is_err()
+        );
+        assert!(
+            parse_function_config
+                .parse_str("{ default: borrowed | async }")
+                .is_ok()
         );
         let config = parse_function_config
             .parse_str("{ default: borrowed }")

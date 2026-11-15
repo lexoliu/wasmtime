@@ -112,6 +112,11 @@ impl FunctionConfig {
         let mut ret = FunctionFlags::empty();
         self.add_function_flags(resolve, ns, &func.name, &mut ret);
         ret |= wit_flags;
+        // Prepared input types must be independent of the borrowed Data<'a>.
+        // Keep them on the store-level host trait, as for async WIT imports.
+        if ret.contains(FunctionFlags::BORROWED | FunctionFlags::ASYNC) {
+            ret.insert(FunctionFlags::STORE);
+        }
         if ret.contains(FunctionFlags::IMMEDIATE) {
             ret.remove(FunctionFlags::ASYNC);
         }
