@@ -71,7 +71,7 @@ async fn immediate_host_preserves_reentry_checks() -> Result<()> {
         linker
             .root()
             .func_wrap_concurrent_immediate("increment", |mut store, (_n,): (u32,)| {
-                let reenter = store.data().unwrap();
+                let reenter = store.data_mut().unwrap();
                 let error = reenter
                     .call(&mut store, ())
                     .expect_err("reentry is forbidden");

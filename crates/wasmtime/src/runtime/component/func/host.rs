@@ -3,7 +3,7 @@
 #[cfg(feature = "component-model-async")]
 use crate::component::concurrent;
 #[cfg(feature = "component-model-async")]
-use crate::component::concurrent::{Accessor, Status};
+use crate::component::concurrent::{Access, Accessor, Status};
 use crate::component::func::{LiftContext, LowerContext};
 use crate::component::matching::InstanceType;
 use crate::component::storage::{slice_to_storage, slice_to_storage_mut};
@@ -62,6 +62,32 @@ impl core::fmt::Debug for HostFunc {
     }
 }
 
+/// The call a host function is serving: the component instance the guest
+/// called it from and the `canon lower` options it called through.
+///
+/// Captured once, when the host call is entered, and carried with that call
+/// alone — into the [`Access`] of a synchronous host and the [`Accessor`] of
+/// a concurrent one — so a host that suspends still answers for its own
+/// call after others have run.
+#[derive(Clone, Copy)]
+pub(crate) struct HostCaller {
+    instance: Instance,
+    options: OptionsIndex,
+}
+
+impl HostCaller {
+    /// The core memory the call's options name: the calling subcomponent's
+    /// own linear memory. `None` when the options name no memory, or name a
+    /// shared one, which has no unshared [`Memory`](crate::Memory) handle.
+    #[cfg_attr(
+        not(feature = "component-model-async"),
+        expect(dead_code, reason = "only `Access` reads it")
+    )]
+    pub(crate) fn memory(self, store: &crate::store::StoreOpaque) -> Option<crate::Memory> {
+        self.instance.options_memory_handle(store, self.options)
+    }
+}
+
 enum HostResult<T> {
     Done(Result<T>),
     #[cfg(feature = "component-model-async")]
@@ -106,8 +132,25 @@ impl HostFunc {
     {
         Self::new(
             Asyncness::No,
-            StaticHostFn::<_, false>::new(move |store, params| {
+            StaticHostFn::<_, false>::new(move |store, _caller, params| {
                 HostResult::Done(func(store, params))
+            }),
+        )
+    }
+
+    /// Equivalent for `Linker::func_wrap_access`
+    #[cfg(feature = "component-model-async")]
+    pub(crate) fn func_wrap_access<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>
+    where
+        T: 'static,
+        F: Fn(Access<'_, T>, P) -> Result<R> + Send + Sync + 'static,
+        P: ComponentNamedList + Lift + 'static,
+        R: ComponentNamedList + Lower + 'static,
+    {
+        Self::new(
+            Asyncness::No,
+            StaticHostFn::<_, false>::new(move |store, caller, params| {
+                HostResult::Done(func(Access::for_call(store, caller), params))
             }),
         )
     }
@@ -122,7 +165,7 @@ impl HostFunc {
     {
         Self::new(
             Asyncness::No,
-            StaticHostFn::<_, false, true>::new(move |mut store, params| {
+            StaticHostFn::<_, false, true>::new(move |mut store, _caller, params| {
                 HostResult::Done(func(store.data_mut(), params))
             }),
         )
@@ -138,7 +181,7 @@ impl HostFunc {
     {
         Self::new(
             Asyncness::No,
-            StaticHostFn::<_, false, true>::new(move |store, params| {
+            StaticHostFn::<_, false, true>::new(move |store, _caller, params| {
                 let (data, opaque) = store.0.data_and_opaque();
                 HostResult::Done(func(data, HostMemory { store: opaque }, params))
             }),
@@ -150,14 +193,14 @@ impl HostFunc {
     pub(crate) fn func_wrap_concurrent_immediate<T, F, P, R>(func: F) -> Result<Arc<HostFunc>>
     where
         T: 'static,
-        F: Fn(StoreContextMut<T>, P) -> Result<R> + Send + Sync + 'static,
+        F: Fn(Access<'_, T>, P) -> Result<R> + Send + Sync + 'static,
         P: ComponentNamedList + Lift + 'static,
         R: ComponentNamedList + Lower + 'static,
     {
         Self::new(
             Asyncness::No,
-            StaticHostFn::<_, true>::new(move |store, params| {
-                HostResult::Done(func(store, params))
+            StaticHostFn::<_, true>::new(move |store, caller, params| {
+                HostResult::Done(func(Access::for_call(store, caller), params))
             }),
         )
     }
@@ -176,7 +219,7 @@ impl HostFunc {
     {
         Self::new(
             Asyncness::Yes,
-            StaticHostFn::<_, false>::new(move |store, params| {
+            StaticHostFn::<_, false>::new(move |store, _caller, params| {
                 HostResult::Done(
                     store
                         .block_on(|store| Pin::from(func(store, params)))
@@ -205,7 +248,7 @@ impl HostFunc {
     {
         Self::new(
             Asyncness::Yes,
-            StaticHostFn::<_, false>::new(move |store: StoreContextMut<'_, T>, params| {
+            StaticHostFn::<_, false>::new(move |store: StoreContextMut<'_, T>, _caller, params| {
                 let prepared = {
                     let (data, opaque) = store.0.data_and_opaque();
                     prepare(data, HostMemory { store: opaque }, params)
@@ -234,10 +277,10 @@ impl HostFunc {
         let func = Arc::new(func);
         Self::new(
             Asyncness::Yes,
-            StaticHostFn::<_, true>::new(move |store, params| {
+            StaticHostFn::<_, true>::new(move |store, caller, params| {
                 let func = func.clone();
                 HostResult::Future(Box::pin(
-                    store.wrap_call(move |accessor| func(accessor, params)),
+                    store.wrap_call(caller, move |accessor| func(accessor, params)),
                 ))
             }),
         )
@@ -263,7 +306,7 @@ impl HostFunc {
         let func = Arc::new(func);
         Self::new(
             Asyncness::Yes,
-            StaticHostFn::<_, true>::new(move |store: StoreContextMut<'_, T>, params| {
+            StaticHostFn::<_, true>::new(move |store: StoreContextMut<'_, T>, caller, params| {
                 let prepared = {
                     let (data, opaque) = store.0.data_and_opaque();
                     prepare(data, HostMemory { store: opaque }, params)
@@ -273,7 +316,7 @@ impl HostFunc {
                     Ok(prepared) => {
                         let func = func.clone();
                         HostResult::Future(Box::pin(
-                            store.wrap_call(move |accessor| func(accessor, prepared)),
+                            store.wrap_call(caller, move |accessor| func(accessor, prepared)),
                         ))
                     }
                 }
@@ -293,7 +336,7 @@ impl HostFunc {
         Self::new(
             Asyncness::No,
             DynamicHostFn::<_, false>::new(
-                move |store, ty, mut params_and_results, result_start| {
+                move |store, _caller, ty, mut params_and_results, result_start| {
                     let (params, results) = params_and_results.split_at_mut(result_start);
                     let result = func(store, ty, params, results).map(move |()| params_and_results);
                     HostResult::Done(result)
@@ -320,7 +363,7 @@ impl HostFunc {
         Self::new(
             Asyncness::Yes,
             DynamicHostFn::<_, false>::new(
-                move |store, ty, mut params_and_results, result_start| {
+                move |store, _caller, ty, mut params_and_results, result_start| {
                     let (params, results) = params_and_results.split_at_mut(result_start);
                     let result = store
                         .with_blocking(|store, cx| {
@@ -353,9 +396,9 @@ impl HostFunc {
         Self::new(
             Asyncness::Yes,
             DynamicHostFn::<_, true>::new(
-                move |store, ty, mut params_and_results, result_start| {
+                move |store, caller, ty, mut params_and_results, result_start| {
                     let func = func.clone();
-                    HostResult::Future(Box::pin(store.wrap_call(move |accessor| {
+                    HostResult::Future(Box::pin(store.wrap_call(caller, move |accessor| {
                         Box::pin(async move {
                             let (params, results) = params_and_results.split_at_mut(result_start);
                             func(accessor, ty, params, results).await?;
@@ -435,8 +478,8 @@ where
     /// with the provided signature that a component is using.
     fn typecheck(ty: TypeFuncIndex, types: &InstanceType<'_>) -> Result<()>;
 
-    /// Execute this host function.
-    fn run(&self, store: StoreContextMut<'_, T>, params: P) -> HostResult<R>;
+    /// Execute this host function for the call `caller` made.
+    fn run(&self, store: StoreContextMut<'_, T>, caller: HostCaller, params: P) -> HostResult<R>;
 
     /// Performs the lifting operation to convert arguments from the canonical
     /// ABI in wasm memory/arguments into their Rust representation.
@@ -529,7 +572,8 @@ where
                     };
                     let mut lift = LiftContext::new(store.0.store_opaque_mut(), options, instance)?;
                     let params = Self::lift_params(&mut lift, ty, Source::Flat(params))?;
-                    let value = match data.run(store.as_context_mut(), params) {
+                    let caller = HostCaller { instance, options };
+                    let value = match data.run(store.as_context_mut(), caller, params) {
                         HostResult::Done(result) => result?,
                         #[cfg(feature = "component-model-async")]
                         HostResult::Future(_) => {
@@ -636,7 +680,8 @@ where
         let mut lift = LiftContext::new(store.0.store_opaque_mut(), options, instance)?;
         let (params, rest) = self.load_params(&mut lift, ty, MAX_FLAT_PARAMS, storage)?;
 
-        let ret = match self.run(store.as_context_mut(), params) {
+        let caller = HostCaller { instance, options };
+        let ret = match self.run(store.as_context_mut(), caller, params) {
             HostResult::Done(result) => result?,
             #[cfg(feature = "component-model-async")]
             HostResult::Future(future) => concurrent::poll_and_block(store.0, future)?,
@@ -703,7 +748,8 @@ where
             0
         };
 
-        let host_result = self.run(store.as_context_mut(), params);
+        let caller = HostCaller { instance, options };
+        let host_result = self.run(store.as_context_mut(), caller, params);
 
         let task = match host_result {
             HostResult::Done(result) => {
@@ -857,7 +903,7 @@ impl<F, const ASYNC: bool, const DATA_ONLY: bool> StaticHostFn<F, ASYNC, DATA_ON
         T: 'static,
         P: ComponentNamedList + Lift + 'static,
         R: ComponentNamedList + Lower + 'static,
-        F: Fn(StoreContextMut<'_, T>, P) -> HostResult<R>,
+        F: Fn(StoreContextMut<'_, T>, HostCaller, P) -> HostResult<R>,
     {
         Self(func)
     }
@@ -867,7 +913,7 @@ impl<T, F, P, R, const ASYNC: bool, const DATA_ONLY: bool> HostFn<T, P, R>
     for StaticHostFn<F, ASYNC, DATA_ONLY>
 where
     T: 'static,
-    F: Fn(StoreContextMut<'_, T>, P) -> HostResult<R>,
+    F: Fn(StoreContextMut<'_, T>, HostCaller, P) -> HostResult<R>,
     P: ComponentNamedList + Lift + 'static,
     R: ComponentNamedList + Lower + 'static,
 {
@@ -915,8 +961,8 @@ where
         Ok(())
     }
 
-    fn run(&self, store: StoreContextMut<'_, T>, params: P) -> HostResult<R> {
-        (self.0)(store, params)
+    fn run(&self, store: StoreContextMut<'_, T>, caller: HostCaller, params: P) -> HostResult<R> {
+        (self.0)(store, caller, params)
     }
 
     fn lift_params(cx: &mut LiftContext<'_>, ty: TypeFuncIndex, src: Source<'_>) -> Result<P> {
@@ -969,7 +1015,13 @@ impl<F, const ASYNC: bool> DynamicHostFn<F, ASYNC> {
     fn new<T>(func: F) -> Self
     where
         T: 'static,
-        F: Fn(StoreContextMut<'_, T>, ComponentFunc, Vec<Val>, usize) -> HostResult<Vec<Val>>,
+        F: Fn(
+            StoreContextMut<'_, T>,
+            HostCaller,
+            ComponentFunc,
+            Vec<Val>,
+            usize,
+        ) -> HostResult<Vec<Val>>,
     {
         Self(func)
     }
@@ -979,7 +1031,13 @@ impl<T, F, const ASYNC: bool> HostFn<T, (ComponentFunc, Vec<Val>), Vec<Val>>
     for DynamicHostFn<F, ASYNC>
 where
     T: 'static,
-    F: Fn(StoreContextMut<'_, T>, ComponentFunc, Vec<Val>, usize) -> HostResult<Vec<Val>>,
+    F: Fn(
+        StoreContextMut<'_, T>,
+        HostCaller,
+        ComponentFunc,
+        Vec<Val>,
+        usize,
+    ) -> HostResult<Vec<Val>>,
 {
     const ASYNC: bool = ASYNC;
 
@@ -994,13 +1052,14 @@ where
     fn run(
         &self,
         store: StoreContextMut<'_, T>,
+        caller: HostCaller,
         (ty, mut params): (ComponentFunc, Vec<Val>),
     ) -> HostResult<Vec<Val>> {
         let offset = params.len();
         for _ in 0..ty.results().len() {
             params.push(Val::Bool(false));
         }
-        (self.0)(store, ty, params, offset)
+        (self.0)(store, caller, ty, params, offset)
     }
 
     fn lift_params(

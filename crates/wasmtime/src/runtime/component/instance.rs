@@ -372,29 +372,26 @@ impl Instance {
     }
 
     fn _get_default_memory(&self, store: &mut StoreOpaque) -> Option<Memory> {
-        let env_component = self.id().get(store).component().env_component();
-        if env_component.num_runtime_memories != 1 {
+        let instance = self.id().get(store);
+        if instance.component().env_component().num_runtime_memories != 1 {
             return None;
         }
-        // The one runtime memory is whichever the component extracts during
-        // instantiation, and the initializer that extracted it still names
-        // where it came from. The export is cloned so the shared borrow of the
-        // store ends before the lookup, which needs the store mutably.
-        let export =
-            env_component
-                .initializers
-                .iter()
-                .find_map(|initializer| match initializer {
-                    GlobalInitializer::ExtractMemory(memory) => Some(memory.export.clone()),
-                    _ => None,
-                })?;
-        match lookup_vmexport(store, self.id.instance(), &export) {
-            vm::Export::Memory(memory) => Some(memory),
-            // A shared memory is reached through
-            // [`crate::Instance::get_shared_memory`] on the core instance that
-            // owns it. Handing one back as an unshared [`Memory`] would let a
-            // caller borrow bytes another thread may be writing.
-            _ => None,
+        // The one runtime memory is whichever the component extracted during
+        // instantiation; a shared one was recorded as `None`.
+        instance.memory(RuntimeMemoryIndex::from_u32(0))
+    }
+
+    /// Returns the core memory the canonical options `options` name, as an
+    /// embedder handle: `None` when they name no memory, or a shared one.
+    pub(crate) fn options_memory_handle(
+        &self,
+        store: &StoreOpaque,
+        options: OptionsIndex,
+    ) -> Option<Memory> {
+        let instance = self.id.get(store);
+        match instance.component().env_component().options[options].data_model {
+            CanonicalOptionsDataModel::Gc { .. } => None,
+            CanonicalOptionsDataModel::LinearMemory(o) => instance.memory(o.memory?),
         }
     }
 
@@ -927,7 +924,7 @@ impl<'a> Instantiator<'a> {
 
                 GlobalInitializer::ExtractTable(table) => self.extract_table(store.0, table),
 
-                GlobalInitializer::ExtractMemory(mem) => self.extract_memory(store.0, mem),
+                GlobalInitializer::ExtractMemory(mem) => self.extract_memory(store.0, mem)?,
 
                 GlobalInitializer::ExtractRealloc(realloc) => {
                     self.extract_realloc(store.0, realloc)
@@ -969,14 +966,22 @@ impl<'a> Instantiator<'a> {
         Ok(())
     }
 
-    fn extract_memory(&mut self, store: &mut StoreOpaque, memory: &ExtractMemory) {
-        let import = match lookup_vmexport(store, self.id, &memory.export) {
-            crate::runtime::vm::Export::Memory(memory) => memory.vmimport(store),
-            crate::runtime::vm::Export::SharedMemory(_, import) => import,
+    fn extract_memory(&mut self, store: &mut StoreOpaque, memory: &ExtractMemory) -> Result<()> {
+        let (handle, import) = match lookup_vmexport(store, self.id, &memory.export) {
+            crate::runtime::vm::Export::Memory(handle) => (Some(handle), handle.vmimport(store)),
+            // A shared memory is reached through
+            // [`crate::Instance::get_shared_memory`] on the core instance that
+            // owns it. Handing one back as an unshared [`Memory`] would let a
+            // caller borrow bytes another thread may be writing.
+            crate::runtime::vm::Export::SharedMemory(_, import) => (None, import),
             _ => unreachable!(),
         };
-        self.instance_mut(store)
+        let mut instance = self.instance_mut(store);
+        instance
+            .as_mut()
             .set_runtime_memory(memory.index, import.from.as_non_null());
+        instance.push_memory(memory.index, handle)?;
+        Ok(())
     }
 
     fn extract_realloc(&mut self, store: &mut StoreOpaque, realloc: &ExtractRealloc) {
