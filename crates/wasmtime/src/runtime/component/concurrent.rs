@@ -51,7 +51,7 @@
 //! in host functions.
 
 use self::error_contexts::GlobalErrorContextRefCount;
-use crate::component::func::{Func, call_post_return};
+use crate::component::func::{Func, HostCaller, call_post_return};
 use crate::component::store::ComponentInstanceId;
 use crate::component::{
     HasData, HasSelf, Instance, Resource, ResourceTable, ResourceTableError, RuntimeInstance,
@@ -73,7 +73,7 @@ use crate::vm::component::{
 use crate::vm::{
     AlwaysMut, SendSyncPtr, UncaughtException, VMFuncRef, VMLazyThread, VMMemoryDefinition, VMStore,
 };
-use crate::{AsContext, AsContextMut, Result, StoreContext, StoreContextMut, ValRaw, bail};
+use crate::{AsContext, AsContextMut, Memory, Result, StoreContext, StoreContextMut, ValRaw, bail};
 use crate::{Instance as ModuleInstance, bail_bug};
 use alloc::borrow::ToOwned;
 use alloc::collections::btree_map::Entry;
@@ -235,6 +235,19 @@ const START_FLAG_ASYNC_CALLER: u32 = wasmtime_environ::component::START_FLAG_ASY
 pub struct Access<'a, T: 'static, D: HasData + ?Sized = HasSelf<T>> {
     store: StoreContextMut<'a, T>,
     get_data: fn(&mut T) -> D::Data<'_>,
+    caller: Option<HostCaller>,
+}
+
+impl<'a, T> Access<'a, T> {
+    /// The [`Access`] Wasmtime hands a synchronous host function serving the
+    /// call `caller` made.
+    pub(crate) fn for_call(store: StoreContextMut<'a, T>, caller: HostCaller) -> Self {
+        Self {
+            store,
+            get_data: |x| x,
+            caller: Some(caller),
+        }
+    }
 }
 
 impl<'a, T, D> Access<'a, T, D>
@@ -243,8 +256,59 @@ where
     T: 'static,
 {
     /// Creates a new [`Access`] from its component parts.
+    ///
+    /// An [`Access`] made this way serves no guest call, so its
+    /// [`Self::caller_memory`] is `None`.
     pub fn new(store: StoreContextMut<'a, T>, get_data: fn(&mut T) -> D::Data<'_>) -> Self {
-        Self { store, get_data }
+        Self {
+            store,
+            get_data,
+            caller: None,
+        }
+    }
+
+    /// Changes this access to project `D2` instead of `D`, keeping the call
+    /// it serves.
+    pub fn with_getter<D2: HasData + ?Sized>(
+        self,
+        get_data: fn(&mut T) -> D2::Data<'_>,
+    ) -> Access<'a, T, D2> {
+        Access {
+            store: self.store,
+            get_data,
+            caller: self.caller,
+        }
+    }
+
+    /// Returns the linear memory of the guest call this host function is
+    /// serving.
+    ///
+    /// This is the memory named by the `canon lower` options through which
+    /// the guest called the host function: the calling subcomponent's own
+    /// memory, the one its pointers into "this instance's linear memory"
+    /// are relative to. A component composed of several subcomponents has
+    /// several such memories, and each call answers with its own caller's.
+    ///
+    /// The answer belongs to the call, not to the store. For a host function
+    /// defined with
+    /// [`LinkerInstance::func_wrap_concurrent`](crate::component::LinkerInstance::func_wrap_concurrent)
+    /// every [`Accessor::with`] of that call's future answers with that
+    /// call's memory, however many other calls ran while it was suspended.
+    ///
+    /// Returns `None` when the call's options name no memory, when they name
+    /// a shared memory (which has no unshared [`Memory`] handle; it is
+    /// reached through [`crate::Instance::get_shared_memory`]), and when this
+    /// access serves no guest call: one made with [`Self::new`], one in a
+    /// task started with [`Self::spawn`] or [`Accessor::spawn`], and one
+    /// given to a host function registered with a closure that is not given
+    /// an [`Access`] or [`Accessor`] by Wasmtime.
+    pub fn caller_memory(&self) -> Option<Memory> {
+        self.caller?.memory(self.store.0)
+    }
+
+    /// Get shared access to the store data.
+    pub fn data(&self) -> &T {
+        self.store.data()
     }
 
     /// Get mutable access to the store data.
@@ -264,9 +328,11 @@ where
     where
         T: 'static,
     {
+        // A spawned task serves no guest call of its own.
         let accessor = Accessor {
             get_data: self.get_data,
             token: StoreToken::new(self.store.as_context_mut()),
+            caller: None,
         };
         self.store
             .as_context_mut()
@@ -367,6 +433,9 @@ where
 {
     token: StoreToken<T>,
     get_data: fn(&mut T) -> D::Data<'_>,
+    /// The guest call this accessor's host future serves, if any; see
+    /// [`Access::caller_memory`].
+    caller: Option<HostCaller>,
 }
 
 /// A helper trait to take any type of accessor-with-data in functions.
@@ -455,6 +524,16 @@ impl<T> Accessor<T> {
         Self {
             token,
             get_data: |x| x,
+            caller: None,
+        }
+    }
+
+    /// The accessor of the host future serving the call `caller` made.
+    fn for_call(token: StoreToken<T>, caller: HostCaller) -> Self {
+        Self {
+            token,
+            get_data: |x| x,
+            caller: Some(caller),
         }
     }
 }
@@ -485,6 +564,7 @@ where
             fun(Access {
                 store: self.token.as_context_mut(vmstore),
                 get_data: self.get_data,
+                caller: self.caller,
             })
         })
     }
@@ -518,6 +598,7 @@ where
         Accessor {
             token: self.token,
             get_data,
+            caller: self.caller,
         }
     }
 
@@ -545,9 +626,11 @@ where
     }
 
     fn clone_for_spawn(&self) -> Self {
+        // A spawned task serves no guest call of its own.
         Self {
             token: self.token,
             get_data: self.get_data,
+            caller: None,
         }
     }
 
@@ -1794,7 +1877,11 @@ impl<T> StoreContextMut<'_, T> {
     /// it an `&Accessor<T>`.
     ///
     /// See the `Accessor` documentation for details.
-    pub(crate) fn wrap_call<F, R>(self, closure: F) -> impl Future<Output = Result<R>> + 'static
+    pub(crate) fn wrap_call<F, R>(
+        self,
+        caller: HostCaller,
+        closure: F,
+    ) -> impl Future<Output = Result<R>> + 'static
     where
         T: 'static,
         F: FnOnce(&Accessor<T>) -> Pin<Box<dyn Future<Output = Result<R>> + Send + '_>>
@@ -1805,7 +1892,10 @@ impl<T> StoreContextMut<'_, T> {
     {
         let token = StoreToken::new(self);
         async move {
-            let mut accessor = Accessor::new(token);
+            // The accessor lives in this call's future and nowhere else, so
+            // every poll of it, however many other calls ran in between,
+            // answers for this call.
+            let mut accessor = Accessor::for_call(token, caller);
             closure(&mut accessor).await
         }
     }

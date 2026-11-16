@@ -2949,7 +2949,7 @@ pub fn add_to_linker<T, D>(
             } else if !flags.contains(FunctionFlags::STORE) {
                 "func_wrap_data"
             } else {
-                "func_wrap"
+                "func_wrap_access"
             },
             func.name
         );
@@ -2982,6 +2982,15 @@ pub fn add_to_linker<T, D>(
             !func.kind.is_async() && !flags.intersects(FunctionFlags::ASYNC | FunctionFlags::STORE);
         let wt = self.generator.wasmtime_path();
         let prepared = flags.contains(FunctionFlags::BORROWED | FunctionFlags::ASYNC);
+        // The registrations Wasmtime hands an `Access` for the call:
+        // `func_wrap_concurrent_immediate` and, for synchronous `store`
+        // imports, `func_wrap_access`.
+        let given_access = if func.kind.is_async() {
+            flags.contains(FunctionFlags::IMMEDIATE)
+        } else {
+            !flags.intersects(FunctionFlags::ASYNC | FunctionFlags::BORROWED)
+                && flags.contains(FunctionFlags::STORE)
+        };
         if prepared {
             let host_trait = self.host_input_trait(owner, func);
             let input = Self::host_prepared_name(func)?;
@@ -3006,6 +3015,18 @@ pub fn add_to_linker<T, D>(
                 );
             } else if data_only {
                 uwrite!(self.src, "move |caller: &mut T, (");
+            } else if given_access {
+                // A `store` import hands the access on whole; any other
+                // reads its data through it.
+                let mutability = if flags.contains(FunctionFlags::STORE) {
+                    ""
+                } else {
+                    "mut "
+                };
+                uwrite!(
+                    self.src,
+                    "move |{mutability}caller: {wt}::component::Access<'_, T>, ("
+                );
             } else {
                 uwrite!(
                     self.src,
@@ -3112,6 +3133,8 @@ pub fn add_to_linker<T, D>(
                 self.src,
                 "let host = &caller.with_getter::<D>(host_getter);"
             );
+        } else if given_access && flags.contains(FunctionFlags::STORE) {
+            uwriteln!(self.src, "let host = caller.with_getter::<D>(host_getter);");
         } else if flags.contains(FunctionFlags::STORE) {
             uwriteln!(
                 self.src,

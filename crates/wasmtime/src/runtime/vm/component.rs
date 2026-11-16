@@ -21,7 +21,7 @@ use crate::runtime::vm::{
     VMWasmCallFunction, ValRaw, VmPtr, VmSafe, catch_unwind_and_record_trap,
 };
 use crate::store::InstanceId;
-use crate::{Func, Result, bail, vm};
+use crate::{Func, Memory, Result, bail, vm};
 use alloc::alloc::Layout;
 use alloc::sync::Arc;
 use core::mem;
@@ -424,6 +424,14 @@ pub struct ComponentInstance {
     /// `Store` that this component belongs to.
     instances: TryPrimaryMap<RuntimeInstanceIndex, InstanceId>,
 
+    /// The embedder handle on each core memory the component extracted for
+    /// its canonical options, in `RuntimeMemoryIndex` order.
+    ///
+    /// `None` is a shared memory, which has no unshared [`Memory`] handle.
+    /// Filled by `push_memory` as instantiation runs each `ExtractMemory`
+    /// initializer.
+    memories: TryPrimaryMap<RuntimeMemoryIndex, Option<Memory>>,
+
     /// Storage for the type information about resources within this component
     /// instance.
     resource_types: Arc<TryPrimaryMap<ResourceIndex, ResourceType>>,
@@ -626,12 +634,20 @@ impl ComponentInstance {
                 .try_into()
                 .unwrap(),
         )?;
+        let memories = TryPrimaryMap::with_capacity(
+            component
+                .env_component()
+                .num_runtime_memories
+                .try_into()
+                .unwrap(),
+        )?;
 
         let mut ret = OwnedInstance::new(ComponentInstance {
             id,
             offsets,
             instance_states,
             instances,
+            memories,
             component: component.clone(),
             resource_types,
             imports: imports.clone(),
@@ -1263,6 +1279,34 @@ impl ComponentInstance {
     /// Panics if `idx` hasn't been initialized yet.
     pub fn instance(&self, idx: RuntimeInstanceIndex) -> InstanceId {
         self.instances[idx]
+    }
+
+    /// Records the embedder handle on the runtime memory `idx` that an
+    /// `ExtractMemory` initializer just extracted, `None` for a shared one.
+    ///
+    /// The compiler numbers runtime memories in the order their initializers
+    /// run, so each push lands at the index its initializer names.
+    pub fn push_memory(
+        self: Pin<&mut Self>,
+        idx: RuntimeMemoryIndex,
+        memory: Option<Memory>,
+    ) -> Result<(), OutOfMemory> {
+        // SAFETY: we've chosen the `Pin` guarantee of `Self` to not apply to
+        // the map modified.
+        let memories = unsafe { &mut self.get_unchecked_mut().memories };
+        let pushed = memories.push(memory)?;
+        debug_assert_eq!(pushed, idx, "runtime memories are extracted in index order");
+        Ok(())
+    }
+
+    /// Returns the handle `push_memory` recorded for the runtime memory
+    /// `idx`: `None` when that memory is shared.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx` hasn't been extracted yet.
+    pub fn memory(&self, idx: RuntimeMemoryIndex) -> Option<Memory> {
+        self.memories[idx]
     }
 
     fn instances_mut(self: Pin<&mut Self>) -> &mut TryPrimaryMap<RuntimeInstanceIndex, InstanceId> {

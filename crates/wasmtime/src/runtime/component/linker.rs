@@ -1,5 +1,5 @@
 #[cfg(feature = "component-model-async")]
-use crate::component::concurrent::Accessor;
+use crate::component::concurrent::{Access, Accessor};
 use crate::component::func::HostFunc;
 use crate::component::instance::RuntimeImport;
 use crate::component::matching::{InstanceType, TypeChecker};
@@ -709,6 +709,26 @@ impl<T: 'static> LinkerInstance<'_, T> {
         Ok(())
     }
 
+    /// Defines a synchronous host function that is given an [`Access`] to the
+    /// store for the call it is serving.
+    ///
+    /// This is [`Self::func_wrap`] with the store handed over as an
+    /// [`Access`] rather than a bare [`StoreContextMut`]: everything the
+    /// store allows is still reachable through it, and in addition
+    /// [`Access::caller_memory`] answers with the linear memory of the guest
+    /// call being served, the memory its `canon lower` options name.
+    /// `bindgen!` registers its synchronous `store` imports this way.
+    #[cfg(feature = "component-model-async")]
+    pub fn func_wrap_access<F, Params, Return>(&mut self, name: &str, func: F) -> Result<()>
+    where
+        F: Fn(Access<'_, T>, Params) -> Result<Return> + Send + Sync + 'static,
+        Params: ComponentNamedList + Lift + 'static,
+        Return: ComponentNamedList + Lower + 'static,
+    {
+        self.insert(name, Definition::Func(HostFunc::func_wrap_access(func)?))?;
+        Ok(())
+    }
+
     /// Defines a synchronous host function with access to the store's data.
     ///
     /// Unlike [`Self::func_wrap`], the closure cannot access the store itself
@@ -957,6 +977,8 @@ impl<T: 'static> LinkerInstance<'_, T> {
     /// returns its result directly, without allocating a host future. Unlike
     /// [`Self::func_wrap`], it does not satisfy a synchronous WIT import.
     /// Resource scopes, reentry and traps follow the concurrent call contract.
+    /// The closure is given an [`Access`] to the store, whose
+    /// [`Access::caller_memory`] is the memory of the call it is serving.
     ///
     /// Requires [`Config::concurrency_support`](crate::Config::concurrency_support).
     #[cfg(feature = "component-model-async")]
@@ -967,7 +989,7 @@ impl<T: 'static> LinkerInstance<'_, T> {
     ) -> Result<()>
     where
         T: 'static,
-        F: Fn(StoreContextMut<T>, Params) -> Result<Return> + Send + Sync + 'static,
+        F: Fn(Access<'_, T>, Params) -> Result<Return> + Send + Sync + 'static,
         Params: ComponentNamedList + Lift + 'static,
         Return: ComponentNamedList + Lower + 'static,
     {
