@@ -2664,6 +2664,12 @@ impl StoreOpaque {
     }
 }
 
+struct ProducerState<P, B> {
+    producer: P,
+    buffer: B,
+    dropped: bool,
+}
+
 impl<T> StoreContextMut<'_, T> {
     fn new_transmit<P: StreamProducer<T>>(
         mut self,
@@ -2678,16 +2684,19 @@ impl<T> StoreContextMut<'_, T> {
         let (_, read) = state.new_transmit(TransmitOrigin::Host {
             typecheck: types::typecheck_payload::<P::Item>,
         })?;
-        let producer = Arc::new(LockedState::new((Box::pin(producer), P::Buffer::default())));
+        let producer = Arc::new(LockedState::new(ProducerState {
+            producer: Box::pin(producer),
+            buffer: P::Buffer::default(),
+            dropped: false,
+        }));
         let id = state.get_mut(read)?.state;
-        let mut dropped = false;
         let produce = Box::new({
             let producer = producer.clone();
             move || {
                 let producer = producer.clone();
                 async move {
                     let mut state = producer.take()?;
-                    let (mine, buffer) = &mut *state;
+                    let ProducerState { producer: mine, buffer, dropped } = &mut *state;
 
                     let (result, cancelled) = if buffer.remaining().is_empty() {
                         let mut residency = ResidencyCheck::default();
@@ -2771,9 +2780,9 @@ impl<T> StoreContextMut<'_, T> {
                                                  after producing at least one item"
                                             )
                                         }
-                                         Some(cx.waker().clone())
+                                        Some(cx.waker().clone())
                                     } else {
-                                         None
+                                        None
                                     };
                                 }
 
@@ -2829,11 +2838,13 @@ impl<T> StoreContextMut<'_, T> {
                             }
                         }
                         StreamResult::Dropped => {
-                            dropped = true;
+                            *dropped = true;
                         }
                     }
 
                     let write_buffer = !buffer.remaining().is_empty() || host_offset > 0;
+
+                    let dropped = *dropped;
 
                     drop(state);
 
@@ -2842,7 +2853,7 @@ impl<T> StoreContextMut<'_, T> {
                     }
 
                     Ok(if dropped {
-                        if producer.with(|p| p.1.remaining().is_empty())?  {
+                        if producer.with(|p| p.buffer.remaining().is_empty())? {
                             StreamResult::Dropped
                         } else {
                             StreamResult::Completed
@@ -2855,11 +2866,19 @@ impl<T> StoreContextMut<'_, T> {
             }
         });
         let try_into = Box::new(move |ty| {
-            let (mine, buffer) = producer.try_lock().ok()?.take()?;
+            let ProducerState {
+                producer: mine,
+                buffer,
+                dropped,
+            } = producer.try_lock().ok()?.take()?;
             match P::try_into(mine, buffer, ty) {
                 Ok(value) => Some(value),
                 Err((mine, buffer)) => {
-                    *producer.try_lock().ok()? = Some((mine, buffer));
+                    *producer.try_lock().ok()? = Some(ProducerState {
+                        producer: mine,
+                        buffer,
+                        dropped,
+                    });
                     None
                 }
             }
@@ -3093,7 +3112,7 @@ impl<T> StoreContextMut<'_, T> {
 async fn write<D: 'static, P: Send + 'static, T: func::Lower + 'static, B: WriteBuffer<T>>(
     token: StoreToken<D>,
     id: TableId<TransmitState>,
-    pair: Arc<LockedState<(P, B)>>,
+    producer: Arc<LockedState<ProducerState<P, B>>>,
     kind: TransmitKind,
 ) -> Result<()> {
     let (read, guest_offset) = tls::get(|store| {
@@ -3134,11 +3153,11 @@ async fn write<D: 'static, P: Send + 'static, T: func::Lower + 'static, B: Write
                 })?;
             }
 
-            let old_remaining = pair.with(|p| p.1.remaining().len())?;
+            let old_remaining = producer.with(|p| p.buffer.remaining().len())?;
             let accept = {
-                let pair = pair.clone();
+                let producer = producer.clone();
                 move |mut store: StoreContextMut<D>| {
-                    let mut state = pair.take()?;
+                    let mut state = producer.take()?;
                     lower::<T, B, D>(
                         store.as_context_mut(),
                         instance,
@@ -3146,7 +3165,7 @@ async fn write<D: 'static, P: Send + 'static, T: func::Lower + 'static, B: Write
                         ty,
                         address + (T::SIZE32 * guest_offset.as_usize()),
                         count.as_usize() - guest_offset.as_usize(),
-                        &mut state.1,
+                        &mut state.buffer,
                     )?;
                     crate::error::Ok(())
                 }
@@ -3221,7 +3240,7 @@ async fn write<D: 'static, P: Send + 'static, T: func::Lower + 'static, B: Write
             }
 
             tls::get(|store| {
-                let count = old_remaining - pair.with(|p| p.1.remaining().len())?;
+                let count = old_remaining - producer.with(|p| p.buffer.remaining().len())?;
 
                 let transmit = store.concurrent_state_mut()?.get_mut(id)?;
 
@@ -3263,8 +3282,8 @@ async fn write<D: 'static, P: Send + 'static, T: func::Lower + 'static, B: Write
             }
 
             {
-                let mut pair = pair.take()?;
-                let (_, buffer) = &mut *pair;
+                let mut producer = producer.take()?;
+                let ProducerState { buffer, .. } = &mut *producer;
 
                 while !(matches!(state, StreamResult::Dropped) || buffer.remaining().is_empty()) {
                     state = accept(&mut UntypedWriteBuffer::new(buffer)).await?;
