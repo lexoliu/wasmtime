@@ -4393,14 +4393,75 @@ impl FuncEnvironment<'_> {
         // provided `op`. Stack-limit interruption needs no check here: the
         // libcall delivers a request between chunks itself.
         match op {
-            BulkOp::MemoryCopy { dst, src, len, .. } => {
-                let memory_copy = self.builtin_functions.memory_copy(&mut builder.func);
-                self.call_builtin(builder, memory_copy, &[vmctx, dst, src, len]);
-            }
-            BulkOp::MemoryFill { dst, val, len } => {
-                let memory_fill = self.builtin_functions.memory_fill(&mut builder.func);
-                self.call_builtin(builder, memory_fill, &[vmctx, dst, val, len]);
-            }
+            BulkOp::MemoryCopy {
+                dst,
+                src,
+                len,
+                src_entity,
+                dst_entity,
+                dst_off,
+                src_off,
+                ..
+            } => match (dst_entity, src_entity) {
+                (CheckedEntity::Memory(dst_mem), CheckedEntity::Memory(src_mem)) => {
+                    let dst_mem = builder.ins().iconst(I32, i64::from(dst_mem.as_u32()));
+                    let src_mem = builder.ins().iconst(I32, i64::from(src_mem.as_u32()));
+                    let memory_copy = self
+                        .builtin_functions
+                        .memory_copy_indexed(&mut builder.func);
+                    self.call_builtin(
+                        builder,
+                        memory_copy,
+                        &[
+                            vmctx,
+                            dst_mem,
+                            dst_off.expect("memory dst carries wasm offset"),
+                            src_mem,
+                            src_off.expect("memory src carries wasm offset"),
+                            len,
+                        ],
+                    );
+                }
+                (CheckedEntity::Memory(dst_mem), _) => {
+                    let dst_mem = builder.ins().iconst(I32, i64::from(dst_mem.as_u32()));
+                    let memory_init = self
+                        .builtin_functions
+                        .memory_init_indexed(&mut builder.func);
+                    self.call_builtin(
+                        builder,
+                        memory_init,
+                        &[
+                            vmctx,
+                            dst_mem,
+                            dst_off.expect("memory dst carries wasm offset"),
+                            src,
+                            len,
+                        ],
+                    );
+                }
+                _ => {
+                    let memory_copy = self.builtin_functions.memory_copy(&mut builder.func);
+                    self.call_builtin(builder, memory_copy, &[vmctx, dst, src, len]);
+                }
+            },
+            BulkOp::MemoryFill {
+                dst,
+                val,
+                len,
+                dst_mem,
+            } => match dst_mem {
+                Some((mem, dst_off)) => {
+                    let mem = builder.ins().iconst(I32, i64::from(mem.as_u32()));
+                    let memory_fill = self
+                        .builtin_functions
+                        .memory_fill_indexed(&mut builder.func);
+                    self.call_builtin(builder, memory_fill, &[vmctx, mem, dst_off, val, len]);
+                }
+                None => {
+                    let memory_fill = self.builtin_functions.memory_fill(&mut builder.func);
+                    self.call_builtin(builder, memory_fill, &[vmctx, dst, val, len]);
+                }
+            },
         }
         Ok(())
     }
@@ -4436,14 +4497,22 @@ impl FuncEnvironment<'_> {
             self.unchecked_cast_wasm_addr_to_native_addr(&mut builder.cursor(), len, idx_type);
 
         match entity {
-            CheckedEntity::Memory(_) => self.raw_bulk_memory_operation(
-                builder,
-                BulkOp::MemoryFill {
-                    dst: raw_dst_addr,
-                    val,
-                    len: len_ptr,
-                },
-            ),
+            CheckedEntity::Memory(mem) => {
+                let dst_off = self.unchecked_cast_wasm_addr_to_native_addr(
+                    &mut builder.cursor(),
+                    dst,
+                    idx_type,
+                );
+                self.raw_bulk_memory_operation(
+                    builder,
+                    BulkOp::MemoryFill {
+                        dst: raw_dst_addr,
+                        val,
+                        len: len_ptr,
+                        dst_mem: Some((mem, dst_off)),
+                    },
+                )
+            }
             CheckedEntity::Table { .. } | CheckedEntity::Array { .. } => {
                 self.emit_raw_array_or_table_fill(builder, entity, raw_dst_addr, val, len_ptr)
             }
@@ -4500,6 +4569,7 @@ impl FuncEnvironment<'_> {
                     dst: dst_elem_addr,
                     val: value,
                     len: copy_byte_len,
+                    dst_mem: None,
                 },
             );
         }
@@ -4810,6 +4880,18 @@ impl FuncEnvironment<'_> {
                         | CheckedEntity::Data { .. }
                         | CheckedEntity::RuntimeData(_)
                 ));
+                let dst_off = self.unchecked_cast_wasm_addr_to_native_addr(
+                    &mut builder.cursor(),
+                    dst,
+                    dst_idx_ty,
+                );
+                let src_off = matches!(src_entity, CheckedEntity::Memory(_)).then(|| {
+                    self.unchecked_cast_wasm_addr_to_native_addr(
+                        &mut builder.cursor(),
+                        src,
+                        src_idx_ty,
+                    )
+                });
                 // A memory's elements are bytes, so the element count is already
                 // the byte length.
                 self.raw_bulk_memory_operation(
@@ -4821,6 +4903,8 @@ impl FuncEnvironment<'_> {
                         const_len: const_count,
                         src_entity,
                         dst_entity,
+                        dst_off: Some(dst_off),
+                        src_off,
                     },
                 )
             }
@@ -5187,6 +5271,8 @@ impl FuncEnvironment<'_> {
                     const_len,
                     src_entity,
                     dst_entity,
+                    dst_off: None,
+                    src_off: None,
                 },
             );
         }
@@ -7132,6 +7218,8 @@ enum BulkOp {
         const_len: Option<u64>,
         src_entity: CheckedEntity,
         dst_entity: CheckedEntity,
+        dst_off: Option<ir::Value>,
+        src_off: Option<ir::Value>,
     },
 
     /// A `memory.fill` operation, setting all bytes of `dst` to `val`.
@@ -7144,6 +7232,7 @@ enum BulkOp {
         dst: ir::Value,
         val: ir::Value,
         len: ir::Value,
+        dst_mem: Option<(MemoryIndex, ir::Value)>,
     },
 }
 

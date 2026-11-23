@@ -744,3 +744,139 @@ fn a_one_chunk_operation_leaves_a_request_pending(config: &mut Config) -> Result
     assert_eq!(store.data().seen, [[0xab]]);
     Ok(())
 }
+
+/// Growing a movable linear memory inside a mid-operation interrupt callback
+/// moves its backing allocation; the remaining chunks of `memory.copy` and
+/// `memory.fill` must re-derive the new base pointer instead of touching the
+/// freed buffer.
+#[wasmtime_test(strategies(not(CraneliftPulley)), wasm_features(bulk_memory))]
+fn movable_memory_growth_during_bulk_interrupt_re_derives_base(config: &mut Config) -> Result<()> {
+    config.allocation_strategy(InstanceAllocationStrategy::OnDemand);
+    config.memory_reservation(0);
+    config.memory_reservation_for_growth(0);
+    config.memory_may_move(true);
+    let engine = build_engine(config)?;
+
+    let len = BULK_CHUNK + PAGE;
+    let pages = 2 * len / PAGE;
+    let module = Module::new(&engine, bulk_module(pages))?;
+
+    #[derive(Default)]
+    struct GrowState {
+        memory: Option<Memory>,
+        grew: u32,
+        base_before: usize,
+        base_after: usize,
+    }
+
+    let mut store = Store::new(&engine, GrowState::default());
+    store.interrupt_callback(|mut cx| {
+        let memory = cx.data().memory.expect("memory recorded");
+        let before = memory.data(&cx).as_ptr().addr();
+        memory.grow(&mut cx, 64)?;
+        let after = memory.data(&cx).as_ptr().addr();
+        let state = cx.data_mut();
+        state.grew += 1;
+        state.base_before = before;
+        state.base_after = after;
+        Ok(InterruptAction::Continue)
+    });
+    let handle = store.interrupt_handle()?;
+    let mut linker = Linker::new(&engine);
+    linker.func_wrap("", "request", move || handle.interrupt())?;
+    let instance = linker.instantiate(&mut store, &module)?;
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    store.data_mut().memory = Some(memory);
+
+    // 1. Non-overlapping forwards copy across a memory growth.
+    let (src, dst) = (0, len);
+    memory.data_mut(&mut store)[src..src + len].fill(0x3c);
+    let copy = instance.get_typed_func::<(i32, i32, i32), ()>(&mut store, "copy")?;
+    copy.call(
+        &mut store,
+        (
+            i32::try_from(dst)?,
+            i32::try_from(src)?,
+            i32::try_from(len)?,
+        ),
+    )?;
+    assert_eq!(store.data().grew, 1);
+    let data = memory.data(&store);
+    assert_eq!(data[dst], 0x3c);
+    assert_eq!(data[dst + BULK_CHUNK - 1], 0x3c);
+    assert_eq!(data[dst + BULK_CHUNK], 0x3c);
+    assert_eq!(data[dst + len - 1], 0x3c);
+
+    // 2. Overlapping backwards copy across a memory growth.
+    let pattern = |at: usize| u8::try_from(at / PAGE % 251 + 1).unwrap();
+    for (at, byte) in memory.data_mut(&mut store)[..len].iter_mut().enumerate() {
+        *byte = pattern(at);
+    }
+    copy.call(&mut store, (i32::try_from(PAGE)?, 0, i32::try_from(len)?))?;
+    assert_eq!(store.data().grew, 2);
+    let data = memory.data(&store);
+    for at in [0, 1, PAGE - 1, PAGE, BULK_CHUNK, len - 1] {
+        assert_eq!(data[PAGE + at], pattern(at), "byte {at} after growth");
+    }
+
+    // 3. Long fill across a memory growth.
+    let fill = instance.get_typed_func::<(i32, i32, i32), ()>(&mut store, "fill")?;
+    fill.call(&mut store, (0, 0x7e, i32::try_from(len)?))?;
+    assert_eq!(store.data().grew, 3);
+    let data = memory.data(&store);
+    assert_eq!(data[0], 0x7e);
+    assert_eq!(data[BULK_CHUNK - 1], 0x7e);
+    assert_eq!(data[BULK_CHUNK], 0x7e);
+    assert_eq!(data[len - 1], 0x7e);
+    Ok(())
+}
+
+/// An imported movable linear memory grown inside an interrupt callback also
+/// re-derives its base pointer cleanly through `VMMemoryImport`.
+#[wasmtime_test(strategies(not(CraneliftPulley)), wasm_features(bulk_memory))]
+fn imported_movable_memory_growth_during_bulk_interrupt(config: &mut Config) -> Result<()> {
+    config.allocation_strategy(InstanceAllocationStrategy::OnDemand);
+    config.memory_reservation(0);
+    config.memory_reservation_for_growth(0);
+    config.memory_may_move(true);
+    let engine = build_engine(config)?;
+
+    let len = BULK_CHUNK + PAGE;
+    let pages = u32::try_from(2 * len / PAGE)?;
+    let module = Module::new(
+        &engine,
+        r#"
+        (module
+            (import "" "request" (func $request))
+            (import "" "mem" (memory 1))
+            (func (export "copy") (param $dst i32) (param $src i32) (param $len i32)
+                call $request
+                (memory.copy (local.get $dst) (local.get $src) (local.get $len))))
+        "#,
+    )?;
+
+    let mut store = Store::new(&engine, (None::<Memory>, 0_u32));
+    let memory = Memory::new(&mut store, MemoryType::new(pages, None)?)?;
+    store.data_mut().0 = Some(memory);
+    store.interrupt_callback(|mut cx| {
+        let memory = cx.data().0.expect("imported memory recorded");
+        memory.grow(&mut cx, 64)?;
+        cx.data_mut().1 += 1;
+        Ok(InterruptAction::Continue)
+    });
+    let handle = store.interrupt_handle()?;
+    let mut linker = Linker::new(&engine);
+    linker.func_wrap("", "request", move || handle.interrupt())?;
+    linker.define(&store, "", "mem", memory)?;
+    let instance = linker.instantiate(&mut store, &module)?;
+
+    memory.data_mut(&mut store)[..len].fill(0xa5);
+    let copy = instance.get_typed_func::<(i32, i32, i32), ()>(&mut store, "copy")?;
+    copy.call(&mut store, (i32::try_from(len)?, 0, i32::try_from(len)?))?;
+    assert_eq!(store.data().1, 1);
+    let data = memory.data(&store);
+    assert_eq!(data[len], 0xa5);
+    assert_eq!(data[len + BULK_CHUNK], 0xa5);
+    assert_eq!(data[2 * len - 1], 0xa5);
+    Ok(())
+}

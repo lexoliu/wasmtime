@@ -1757,27 +1757,21 @@ where
         Ok(())
     }
 
-    /// Emit a bounds check for `ptr+len` and put the native address for this
-    /// wasm address into `dst`.
-    fn emit_bounds_check_and_compute_addr(
-        &mut self,
-        heap: &HeapData,
-        dst: Reg,
-        ptr: Reg,
-        len: Reg,
-    ) -> Result<()> {
+    /// Emit a bounds check for `ptr+len`, trapping on overflow or out-of-bounds.
+    fn emit_bounds_check(&mut self, heap: &HeapData, ptr: Reg, len: Reg) -> Result<()> {
         let ptr_size: OperandSize = self.env.ptr_type().try_into()?;
         let idx_size: OperandSize = heap.index_type().try_into()?;
-        // Compute `dst = ptr + len` trapping on overflow. For an `i32` index
+        let end = self.context.any_gpr(self.masm)?;
+        // Compute `end = ptr + len` trapping on overflow. For an `i32` index
         // type the operands are zero-extended to 64-bit so overflow is
         // impossible.
         match idx_size {
             OperandSize::S32 => {
                 self.masm
-                    .extend(writable!(dst), ptr, Extend::<Zero>::I64Extend32.into())?;
+                    .extend(writable!(end), ptr, Extend::<Zero>::I64Extend32.into())?;
                 self.masm.add_uextend(
-                    writable!(dst),
-                    dst,
+                    writable!(end),
+                    end,
                     len,
                     OperandSize::S32,
                     OperandSize::S64,
@@ -1785,10 +1779,10 @@ where
             }
             OperandSize::S64 => {
                 self.masm
-                    .mov(writable!(dst), ptr.into(), OperandSize::S64)?;
+                    .mov(writable!(end), ptr.into(), OperandSize::S64)?;
                 self.masm.checked_uadd(
-                    writable!(dst),
-                    dst,
+                    writable!(end),
+                    end,
                     len.into(),
                     OperandSize::S64,
                     TrapCode::HEAP_OUT_OF_BOUNDS,
@@ -1798,24 +1792,15 @@ where
         }
 
         // Load the current size in bytes of the memory, and trap if
-        // `dst > size_in_bytes`.
+        // `end > size_in_bytes`.
         let size_in_bytes = self.context.any_gpr(self.masm)?;
         self.load_memory_length(&heap, size_in_bytes)?;
         assert!(ptr_size == OperandSize::S64);
-        self.masm.cmp(dst, size_in_bytes.into(), ptr_size)?;
+        self.masm.cmp(end, size_in_bytes.into(), ptr_size)?;
         self.masm
             .trapif(IntCmpKind::GtU, TrapCode::HEAP_OUT_OF_BOUNDS)?;
         self.context.free_reg(size_in_bytes);
-
-        // Compute `dst = memory_base + ptr`.
-        bounds::load_heap_addr_unchecked(
-            self.masm,
-            &heap,
-            Index::from_typed_reg(TypedReg::new(heap.index_type(), ptr)),
-            ImmOffset::from_u32(0),
-            dst,
-            ptr_size,
-        )?;
+        self.context.free_reg(end);
         Ok(())
     }
 
@@ -1823,6 +1808,7 @@ where
     pub fn emit_memory_copy(&mut self, dst_mem: MemoryIndex, src_mem: MemoryIndex) -> Result<()> {
         let dst_heap = self.env.resolve_heap(dst_mem);
         let src_heap = self.env.resolve_heap(src_mem);
+        let ptr_size: OperandSize = self.env.ptr_type().try_into()?;
         let dst_idx_size: OperandSize = dst_heap.index_type().try_into()?;
         let src_idx_size: OperandSize = src_heap.index_type().try_into()?;
 
@@ -1843,25 +1829,37 @@ where
             )?;
         }
 
-        let dst_raw_addr = self.context.any_gpr(self.masm)?;
-        self.emit_bounds_check_and_compute_addr(&dst_heap, dst_raw_addr, dst.reg, len.reg)?;
-        self.context.free_reg(dst);
+        self.emit_bounds_check(&dst_heap, dst.reg, len.reg)?;
+        self.emit_bounds_check(&src_heap, src.reg, len.reg)?;
 
-        let src_raw_addr = self.context.any_gpr(self.masm)?;
-        self.emit_bounds_check_and_compute_addr(&src_heap, src_raw_addr, src.reg, len.reg)?;
-        self.context.free_reg(src);
+        if dst_idx_size == OperandSize::S32 && ptr_size == OperandSize::S64 {
+            self.masm.extend(
+                writable!(dst.reg),
+                dst.reg,
+                Extend::<Zero>::I64Extend32.into(),
+            )?;
+        }
+        if src_idx_size == OperandSize::S32 && ptr_size == OperandSize::S64 {
+            self.masm.extend(
+                writable!(src.reg),
+                src.reg,
+                Extend::<Zero>::I64Extend32.into(),
+            )?;
+        }
 
+        self.context.stack.extend([dst_mem.as_u32().try_into()?]);
         self.context
             .stack
-            .push(TypedReg::new(self.env.ptr_type(), dst_raw_addr).into());
+            .push(TypedReg::new(self.env.ptr_type(), dst.reg).into());
+        self.context.stack.extend([src_mem.as_u32().try_into()?]);
         self.context
             .stack
-            .push(TypedReg::new(self.env.ptr_type(), src_raw_addr).into());
+            .push(TypedReg::new(self.env.ptr_type(), src.reg).into());
         self.context
             .stack
             .push(TypedReg::new(self.env.ptr_type(), len.reg).into());
 
-        let builtin = self.env.builtins.memory_copy::<M::ABI>()?;
+        let builtin = self.env.builtins.memory_copy_indexed::<M::ABI>()?;
         FnCall::emit::<M>(
             &mut self.env,
             self.masm,
@@ -1884,14 +1882,18 @@ where
         let val = self.context.pop_to_reg(self.masm, None)?;
         let dst = self.context.pop_to_reg(self.masm, None)?;
 
-        let raw_addr = self.context.any_gpr(self.masm)?;
-        self.emit_bounds_check_and_compute_addr(&heap, raw_addr, dst.reg, len.reg)?;
-        self.context.free_reg(dst);
+        self.emit_bounds_check(&heap, dst.reg, len.reg)?;
 
-        // The libcall takes the length as a host-pointer-sized integer, so
-        // zero-extend if the wasm index type is smaller.
+        // The libcall takes the offset and length as host-pointer-sized
+        // integers, so zero-extend if the wasm index type is smaller.
+        let dst_reg = dst.reg;
         let len_reg = len.reg;
         if idx_size == OperandSize::S32 && ptr_size == OperandSize::S64 {
+            self.masm.extend(
+                writable!(dst_reg),
+                dst_reg,
+                Extend::<Zero>::I64Extend32.into(),
+            )?;
             self.masm.extend(
                 writable!(len_reg),
                 len_reg,
@@ -1899,16 +1901,17 @@ where
             )?;
         }
 
-        // Set up the call arguments: `[dst_ptr, val, len]`.
+        // Set up the call arguments: `[dst_mem, dst_off, val, len]`.
+        self.context.stack.extend([mem.as_u32().try_into()?]);
         self.context
             .stack
-            .push(TypedReg::new(self.env.ptr_type(), raw_addr).into());
+            .push(TypedReg::new(self.env.ptr_type(), dst_reg).into());
         self.context.stack.push(val.into());
         self.context
             .stack
             .push(TypedReg::new(self.env.ptr_type(), len_reg).into());
 
-        let builtin = self.env.builtins.memory_fill::<M::ABI>()?;
+        let builtin = self.env.builtins.memory_fill_indexed::<M::ABI>()?;
         FnCall::emit::<M>(
             &mut self.env,
             self.masm,
@@ -1923,6 +1926,8 @@ where
     /// Emit the `memory.init` operation.
     pub fn emit_memory_init(&mut self, segment: DataIndex, mem: MemoryIndex) -> Result<()> {
         let dst_heap = self.env.resolve_heap(mem);
+        let ptr_size: OperandSize = self.env.ptr_type().try_into()?;
+        let dst_idx_size: OperandSize = dst_heap.index_type().try_into()?;
 
         let len = self.context.pop_to_reg(self.masm, None)?;
         let src = self.context.pop_to_reg(self.masm, None)?;
@@ -1939,9 +1944,7 @@ where
             Extend::<Zero>::I64Extend32.into(),
         )?;
 
-        let dst_raw_addr = self.context.any_gpr(self.masm)?;
-        self.emit_bounds_check_and_compute_addr(&dst_heap, dst_raw_addr, dst.reg, len.reg)?;
-        self.context.free_reg(dst);
+        self.emit_bounds_check(&dst_heap, dst.reg, len.reg)?;
 
         let runtime_data_index = match self.env.translation.runtime_data_map[segment] {
             Some(i) => i,
@@ -1955,7 +1958,7 @@ where
                 self.masm.cmp(len.reg, RegImm::i32(0), OperandSize::S32)?;
                 self.masm
                     .trapif(IntCmpKind::Ne, TrapCode::HEAP_OUT_OF_BOUNDS)?;
-                self.context.free_reg(dst_raw_addr);
+                self.context.free_reg(dst);
                 self.context.free_reg(src);
                 self.context.free_reg(len);
                 return Ok(());
@@ -2012,11 +2015,22 @@ where
         )?;
         self.context.free_reg(src);
 
-        // And finally, the final step is calling the `memory_copy` libcall.
-        self.context.stack.push(TypedReg::i64(dst_raw_addr).into());
+        if dst_idx_size == OperandSize::S32 && ptr_size == OperandSize::S64 {
+            self.masm.extend(
+                writable!(dst.reg),
+                dst.reg,
+                Extend::<Zero>::I64Extend32.into(),
+            )?;
+        }
+
+        // And finally, the final step is calling the `memory_init_indexed` libcall.
+        self.context.stack.extend([mem.as_u32().try_into()?]);
+        self.context
+            .stack
+            .push(TypedReg::new(self.env.ptr_type(), dst.reg).into());
         self.context.stack.push(TypedReg::i64(tmp1).into());
         self.context.stack.push(len.into());
-        let builtin = self.env.builtins.memory_copy::<M::ABI>()?;
+        let builtin = self.env.builtins.memory_init_indexed::<M::ABI>()?;
         FnCall::emit::<M>(
             &mut self.env,
             self.masm,

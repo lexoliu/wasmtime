@@ -227,6 +227,32 @@ macro_rules! foreach_builtin_function {
             // Handles a bulk write (`memory.{fill,copy,init}`) of `len` bytes
             // to a linear memory, before it, if any of the bytes are watched.
             memory_watch_range(vmctx: vmctx, memory: u32, addr: u64, len: u64) -> bool;
+
+            // Indexed linear-memory bulk operations that re-derive linear memory
+            // base pointers from `vmctx` after delivering a stack-limit
+            // interruption between chunks, keeping movable memories sound.
+            memory_copy_indexed(
+                vmctx: vmctx,
+                dst_mem: u32,
+                dst_off: size,
+                src_mem: u32,
+                src_off: size,
+                len: size
+            ) -> bool;
+            memory_fill_indexed(
+                vmctx: vmctx,
+                dst_mem: u32,
+                dst_off: size,
+                val: u32,
+                len: size
+            ) -> bool;
+            memory_init_indexed(
+                vmctx: vmctx,
+                dst_mem: u32,
+                dst_off: size,
+                src: pointer,
+                len: size
+            ) -> bool;
         }
     };
 }

@@ -467,7 +467,6 @@ impl Instance {
     }
 
     /// Get a locally defined or imported memory.
-    #[cfg(all(has_host_compiler_backend, feature = "debug-builtins"))]
     pub(crate) fn get_memory(&self, index: MemoryIndex) -> VMMemoryDefinition {
         if let Some(defined_index) = self.env_module().defined_memory_index(index) {
             self.memory(defined_index)

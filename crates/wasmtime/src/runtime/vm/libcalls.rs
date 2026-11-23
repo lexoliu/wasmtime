@@ -69,7 +69,8 @@ use core::convert::Infallible;
 use core::time::Duration;
 use wasmtime_core::math::WasmFloat;
 use wasmtime_environ::{
-    CompiledTrap, DefinedMemoryIndex, DefinedTableIndex, PassiveElemIndex, TableIndex, Trap,
+    CompiledTrap, DefinedMemoryIndex, DefinedTableIndex, MemoryIndex, PassiveElemIndex, TableIndex,
+    Trap,
 };
 #[cfg(feature = "wmemcheck")]
 use wasmtime_wmemcheck::AccessError::{
@@ -380,7 +381,8 @@ unsafe fn memory_copy(
     let chunk = bulk_memory_chunk_size();
     // FIXME(#4203): this is known to not be sound in the presence of shared
     // memories.
-    if dst.addr() <= src.addr() {
+    let overlaps_from_above = dst.addr() > src.addr() && dst.addr() - src.addr() < len;
+    if !overlaps_from_above {
         // A forwards copy never overwrites a source byte it has yet to read.
         let mut copied = 0;
         while copied < len {
@@ -433,6 +435,156 @@ unsafe fn memory_fill(
         // shared memories.
         unsafe { dst.add(filled).write_bytes(val, n) };
         filled += n;
+    }
+    Ok(())
+}
+
+/// Implementation of `memory.copy` on linear memories.
+///
+/// Re-derives the destination and source base pointers from `vmctx` after
+/// delivering a stack-limit interruption between chunks so a movable memory
+/// grown inside an interrupt callback never leaves a dangling pointer.
+#[inline]
+unsafe fn memory_copy_indexed(
+    store: &mut dyn VMStore,
+    instance: InstanceId,
+    dst_mem: u32,
+    dst_off: usize,
+    src_mem: u32,
+    src_off: usize,
+    len: usize,
+) -> Result<()> {
+    let dst_mem = MemoryIndex::from_u32(dst_mem);
+    let src_mem = MemoryIndex::from_u32(src_mem);
+    let chunk = bulk_memory_chunk_size();
+    let (mut dst_base, mut src_base) = {
+        let inst = store.instance_mut(instance);
+        (
+            inst.get_memory(dst_mem).base.as_ptr(),
+            inst.get_memory(src_mem).base.as_ptr().cast_const(),
+        )
+    };
+    let dst_addr = dst_base.addr().wrapping_add(dst_off);
+    let src_addr = src_base.addr().wrapping_add(src_off);
+    let overlaps_from_above = dst_addr > src_addr && dst_addr - src_addr < len;
+    // FIXME(#4203): this is known to not be sound in the presence of shared
+    // memories.
+    if !overlaps_from_above {
+        let mut copied = 0;
+        while copied < len {
+            if copied != 0 {
+                deliver_requested_interrupt(store)?;
+                let inst = store.instance_mut(instance);
+                dst_base = inst.get_memory(dst_mem).base.as_ptr();
+                src_base = inst.get_memory(src_mem).base.as_ptr().cast_const();
+            }
+            let n = chunk.min(len - copied);
+            unsafe {
+                src_base
+                    .add(src_off + copied)
+                    .copy_to(dst_base.add(dst_off + copied), n);
+            }
+            copied += n;
+        }
+    } else {
+        let mut remaining = len;
+        while remaining != 0 {
+            if remaining != len {
+                deliver_requested_interrupt(store)?;
+                let inst = store.instance_mut(instance);
+                dst_base = inst.get_memory(dst_mem).base.as_ptr();
+                src_base = inst.get_memory(src_mem).base.as_ptr().cast_const();
+            }
+            let n = chunk.min(remaining);
+            remaining -= n;
+            unsafe {
+                src_base
+                    .add(src_off + remaining)
+                    .copy_to(dst_base.add(dst_off + remaining), n);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Implementation of `memory.fill` on linear memories, re-deriving the memory
+/// base pointer after delivering a stack-limit interruption between chunks.
+#[inline]
+unsafe fn memory_fill_indexed(
+    store: &mut dyn VMStore,
+    instance: InstanceId,
+    dst_mem: u32,
+    dst_off: usize,
+    val: u32,
+    len: usize,
+) -> Result<()> {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the libcall intentionally takes the raw 32-bit value, \
+                  and semantically that's intentionally truncated"
+    )]
+    let val = val as u8;
+    let dst_mem = MemoryIndex::from_u32(dst_mem);
+    let chunk = bulk_memory_chunk_size();
+    let mut dst_base = store
+        .instance_mut(instance)
+        .get_memory(dst_mem)
+        .base
+        .as_ptr();
+    let mut filled = 0;
+    while filled < len {
+        if filled != 0 {
+            deliver_requested_interrupt(store)?;
+            dst_base = store
+                .instance_mut(instance)
+                .get_memory(dst_mem)
+                .base
+                .as_ptr();
+        }
+        let n = chunk.min(len - filled);
+        // FIXME(#4203): this is known to not be sound in the presence of
+        // shared memories.
+        unsafe { dst_base.add(dst_off + filled).write_bytes(val, n) };
+        filled += n;
+    }
+    Ok(())
+}
+
+/// Implementation of `memory.init` on linear memories, re-deriving the
+/// destination memory base pointer after delivering a stack-limit interruption
+/// between chunks. `src` points into the immutable compiled data segment.
+#[inline]
+unsafe fn memory_init_indexed(
+    store: &mut dyn VMStore,
+    instance: InstanceId,
+    dst_mem: u32,
+    dst_off: usize,
+    src: *mut u8,
+    len: usize,
+) -> Result<()> {
+    let dst_mem = MemoryIndex::from_u32(dst_mem);
+    let src = src.cast_const();
+    let chunk = bulk_memory_chunk_size();
+    let mut dst_base = store
+        .instance_mut(instance)
+        .get_memory(dst_mem)
+        .base
+        .as_ptr();
+    let mut copied = 0;
+    while copied < len {
+        if copied != 0 {
+            deliver_requested_interrupt(store)?;
+            dst_base = store
+                .instance_mut(instance)
+                .get_memory(dst_mem)
+                .base
+                .as_ptr();
+        }
+        let n = chunk.min(len - copied);
+        // FIXME(#4203): this is known to not be sound in the presence of
+        // shared memories.
+        unsafe { src.add(copied).copy_to(dst_base.add(dst_off + copied), n) };
+        copied += n;
     }
     Ok(())
 }
