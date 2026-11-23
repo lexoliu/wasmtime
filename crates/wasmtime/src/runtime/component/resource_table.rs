@@ -34,6 +34,68 @@ impl fmt::Display for ResourceTableError {
 
 impl core::error::Error for ResourceTableError {}
 
+/// Tracks and bounds host memory owned by a [`ResourceTable`].
+///
+/// The table charges the limiter for both its backing slot array
+/// (`Vec<Entry>`) and each boxed entry (`size_of::<T>()`) before allocating,
+/// and releases charged bytes when entries are deleted or the table is dropped.
+pub trait ResourceTableLimiter: Send + 'static {
+    /// Attempts to charge `bytes` of host memory.
+    ///
+    /// Returning `false` refuses the allocation and causes
+    /// [`ResourceTable::push`] or [`ResourceTable::push_child`] to fail with
+    /// [`ResourceTableError::Full`] without growing the table.
+    fn try_charge(&mut self, bytes: usize) -> bool;
+
+    /// Releases `bytes` previously charged through [`Self::try_charge`].
+    fn release(&mut self, bytes: usize);
+}
+
+struct TableLimiter {
+    limiter: Box<dyn ResourceTableLimiter>,
+    charged_bytes: usize,
+}
+
+impl TableLimiter {
+    fn new(limiter: impl ResourceTableLimiter) -> Self {
+        Self {
+            limiter: Box::new(limiter),
+            charged_bytes: 0,
+        }
+    }
+
+    fn try_charge(&mut self, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        let Some(next) = self.charged_bytes.checked_add(bytes) else {
+            return false;
+        };
+        if !self.limiter.try_charge(bytes) {
+            return false;
+        }
+        self.charged_bytes = next;
+        true
+    }
+
+    fn release(&mut self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.charged_bytes -= bytes;
+        self.limiter.release(bytes);
+    }
+}
+
+impl Drop for TableLimiter {
+    fn drop(&mut self) {
+        if self.charged_bytes > 0 {
+            let bytes = mem::take(&mut self.charged_bytes);
+            self.limiter.release(bytes);
+        }
+    }
+}
+
 /// The `ResourceTable` type maps a `Resource<T>` to its `T`.
 pub struct ResourceTable<D: DeleteWithTombstone = DefaultTombstone> {
     entries: Vec<Entry>,
@@ -42,6 +104,8 @@ pub struct ResourceTable<D: DeleteWithTombstone = DefaultTombstone> {
     free_count: usize,
     max_capacity: usize,
     live: usize,
+    limiter: Option<TableLimiter>,
+    charged_entries_bytes: usize,
     _tombstone: PhantomData<D>,
 }
 
@@ -107,6 +171,8 @@ pub struct ResourceTableEntry {
     parent: Option<u32>,
     /// The indices of any children of this entry.
     children: BTreeSet<u32>,
+    /// Bytes charged to the table's [`ResourceTableLimiter`] for this entry.
+    charged_bytes: usize,
 }
 
 trait AnyWithTypeName: Any {
@@ -122,11 +188,12 @@ impl<T: Any> AnyWithTypeName for T {
 }
 
 impl ResourceTableEntry {
-    fn new<T: Send + 'static>(entry: T, parent: Option<u32>) -> Self {
+    fn new<T: Send + 'static>(entry: T, parent: Option<u32>, charged_bytes: usize) -> Self {
         Self {
             entry: Box::new(entry),
             parent,
             children: BTreeSet::new(),
+            charged_bytes,
         }
     }
     fn add_child(&mut self, child: u32) {
@@ -220,8 +287,26 @@ impl<D: DeleteWithTombstone> ResourceTable<D> {
             free_count: 0,
             max_capacity: DEFAULT_MAX_CAPACITY,
             live: 0,
+            limiter: None,
+            charged_entries_bytes: 0,
             _tombstone: PhantomData,
         }
+    }
+
+    /// Installs a [`ResourceTableLimiter`] to account for and bound the host
+    /// memory owned by this table's backing slot array and boxed entries.
+    ///
+    /// If a limiter was previously installed, all bytes currently charged to it
+    /// are released first.
+    pub fn set_limiter(&mut self, limiter: impl ResourceTableLimiter) {
+        self.limiter = None;
+        self.charged_entries_bytes = 0;
+        for slot in &mut self.entries {
+            if let Entry::Occupied { entry } = slot {
+                entry.charged_bytes = 0;
+            }
+        }
+        self.limiter = Some(TableLimiter::new(limiter));
     }
 
     /// Returns the number of live resources in this table.
@@ -275,7 +360,7 @@ impl<D: DeleteWithTombstone> ResourceTable<D> {
     where
         T: Send + 'static,
     {
-        let idx = self.push_(ResourceTableEntry::new(entry, None))?;
+        let idx = self.push_value(entry, None)?;
         Ok(Resource::new_own(idx))
     }
 
@@ -297,14 +382,14 @@ impl<D: DeleteWithTombstone> ResourceTable<D> {
     /// Free an entry in the table, returning its [`ResourceTableEntry`]. Add the index to the free list.
     #[inline]
     fn free_entry(&mut self, ix: usize) -> ResourceTableEntry {
-        if D::DELETE_WITH_TOMBSTONE {
+        let mut entry = if D::DELETE_WITH_TOMBSTONE {
             // Instead of making this entry available for reuse, we leave a
             // tombstone in debug mode.  This helps detect use-after-delete and
             // double-delete bugs.
             match mem::replace(
                 &mut self.entries[ix],
                 Entry::Occupied {
-                    entry: ResourceTableEntry::new(Tombstone, None),
+                    entry: ResourceTableEntry::new(Tombstone, None, 0),
                 },
             ) {
                 Entry::Occupied { entry } => {
@@ -331,14 +416,42 @@ impl<D: DeleteWithTombstone> ResourceTable<D> {
             self.live -= 1;
 
             entry
+        };
+
+        if entry.charged_bytes > 0 {
+            if let Some(limiter) = &mut self.limiter {
+                limiter.release(entry.charged_bytes);
+            }
+            entry.charged_bytes = 0;
         }
+        entry
     }
 
     /// Push a new entry into the table, returning its handle. This will prefer to use free entries
     /// if they exist, falling back on pushing new entries onto the end of the table.
-    fn push_(&mut self, e: ResourceTableEntry) -> Result<u32, ResourceTableError> {
-        if let Some(free) = self.pop_free_list() {
-            self.entries[free] = Entry::Occupied { entry: e };
+    fn push_value<T: Send + 'static>(
+        &mut self,
+        entry: T,
+        parent: Option<u32>,
+    ) -> Result<u32, ResourceTableError> {
+        let entry_bytes = if self.limiter.is_some() {
+            mem::size_of::<T>()
+        } else {
+            0
+        };
+
+        if self.free_head.is_some() {
+            if entry_bytes > 0 {
+                if let Some(limiter) = &mut self.limiter {
+                    if !limiter.try_charge(entry_bytes) {
+                        return Err(ResourceTableError::Full);
+                    }
+                }
+            }
+            let free = self.pop_free_list().unwrap();
+            self.entries[free] = Entry::Occupied {
+                entry: ResourceTableEntry::new(entry, parent, entry_bytes),
+            };
             self.live += 1;
             Ok(free.try_into().unwrap())
         } else {
@@ -350,7 +463,37 @@ impl<D: DeleteWithTombstone> ResourceTable<D> {
                 .len()
                 .try_into()
                 .map_err(|_| ResourceTableError::Full)?;
-            self.entries.push(Entry::Occupied { entry: e });
+
+            if self.limiter.is_some() {
+                let needs_grow = self.entries.len() == self.entries.capacity();
+                let target_cap = if needs_grow {
+                    self.entries
+                        .capacity()
+                        .saturating_mul(2)
+                        .max(4)
+                        .min(self.max_capacity)
+                } else {
+                    self.entries.capacity()
+                };
+                let target_bytes = target_cap
+                    .checked_mul(mem::size_of::<Entry>())
+                    .ok_or(ResourceTableError::Full)?;
+                let entries_delta = target_bytes.saturating_sub(self.charged_entries_bytes);
+                let total_charge = entries_delta
+                    .checked_add(entry_bytes)
+                    .ok_or(ResourceTableError::Full)?;
+                if total_charge > 0 && !self.limiter.as_mut().unwrap().try_charge(total_charge) {
+                    return Err(ResourceTableError::Full);
+                }
+                if needs_grow {
+                    self.entries.reserve_exact(target_cap - self.entries.len());
+                }
+                self.charged_entries_bytes += entries_delta;
+            }
+
+            self.entries.push(Entry::Occupied {
+                entry: ResourceTableEntry::new(entry, parent, entry_bytes),
+            });
             self.live += 1;
             Ok(ix)
         }
@@ -396,7 +539,7 @@ impl<D: DeleteWithTombstone> ResourceTable<D> {
     {
         let parent = parent.rep();
         self.occupied(parent)?;
-        let child = self.push_(ResourceTableEntry::new(entry, Some(parent)))?;
+        let child = self.push_value(entry, Some(parent))?;
         self.occupied_mut(parent)?.add_child(child);
         Ok(Resource::new_own(child))
     }
@@ -870,4 +1013,86 @@ fn test_iter_entries() {
     );
     assert_eq!(*table.get(&x).unwrap(), 10);
     assert_eq!(*table.get(&z).unwrap(), 30);
+}
+
+#[test]
+fn test_limiter_charges_refuses_and_releases_exact_bytes() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingLimiter {
+        used: Arc<AtomicUsize>,
+        limit: usize,
+    }
+
+    impl ResourceTableLimiter for CountingLimiter {
+        fn try_charge(&mut self, bytes: usize) -> bool {
+            let current = self.used.load(Ordering::Relaxed);
+            let Some(next) = current.checked_add(bytes) else {
+                return false;
+            };
+            if next > self.limit {
+                return false;
+            }
+            self.used.store(next, Ordering::Relaxed);
+            true
+        }
+
+        fn release(&mut self, bytes: usize) {
+            let prev = self.used.fetch_sub(bytes, Ordering::Relaxed);
+            assert!(prev >= bytes, "underflow: prev={prev} bytes={bytes}");
+        }
+    }
+
+    let slot_bytes = mem::size_of::<Entry>();
+    let used = Arc::new(AtomicUsize::new(0));
+    // Budget for 4 backing slots + two 64-byte entries, not a third.
+    let limit = 4 * slot_bytes + 2 * 64;
+
+    {
+        let mut table = ResourceTable::new();
+        table.set_limiter(CountingLimiter {
+            used: Arc::clone(&used),
+            limit,
+        });
+
+        let a = table.push([1u8; 64]).unwrap();
+        assert_eq!(used.load(Ordering::Relaxed), 4 * slot_bytes + 64);
+
+        let b = table.push_child([2u8; 64], &a).unwrap();
+        assert_eq!(used.load(Ordering::Relaxed), 4 * slot_bytes + 128);
+
+        // Third entry exceeds the limit: refused without growing or inserting.
+        assert!(matches!(
+            table.push([3u8; 64]),
+            Err(ResourceTableError::Full)
+        ));
+        assert_eq!(table.len(), 2);
+        assert_eq!(used.load(Ordering::Relaxed), 4 * slot_bytes + 128);
+
+        // Deleting `b` releases its boxed bytes and returns its slot to the free list.
+        table.delete(b).unwrap();
+        assert_eq!(used.load(Ordering::Relaxed), 4 * slot_bytes + 64);
+
+        // Reusing the freed slot charges only the new entry's bytes.
+        let c = table.push([4u8; 64]).unwrap();
+        assert_eq!(c.rep(), 1);
+        assert_eq!(used.load(Ordering::Relaxed), 4 * slot_bytes + 128);
+
+        // Replacing the limiter releases everything from the prior limiter.
+        let used2 = Arc::new(AtomicUsize::new(0));
+        table.set_limiter(CountingLimiter {
+            used: Arc::clone(&used2),
+            limit: usize::MAX,
+        });
+        assert_eq!(used.load(Ordering::Relaxed), 0);
+
+        let _d = table.push([5u8; 32]).unwrap();
+        assert_eq!(used2.load(Ordering::Relaxed), 4 * slot_bytes + 32);
+
+        drop(table);
+        assert_eq!(used2.load(Ordering::Relaxed), 0);
+    }
+
+    assert_eq!(used.load(Ordering::Relaxed), 0);
 }
